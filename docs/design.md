@@ -1,6 +1,6 @@
 # PILO Incident Investigator 설계
 
-- 상태: 사용자 검토 대기
+- 상태: 사용자 승인 완료, 구현 계획 작성 중
 - 문서 기준일: 2026-08-01
 - 저장소: `pilo-incident-investigator`
 
@@ -43,6 +43,8 @@ PILO Incident Investigator는 AWS 장애 Alarm이 발생하면 PILO의 ECS, Clou
 
 기존 PILO ECS, ALB, RDS, SQS, CloudWatch 및 관련 애플리케이션 리소스는 **조회 대상**이며 이 프로젝트의 Terraform 소유 대상이 아니다. GitHub 배포 이력과 변경 파일도 read-only로 조회한다. Slack Incoming Webhook과 private incident 저장소는 결과 게시 대상이지 애플리케이션 인프라 소유 범위가 아니다.
 
+private GitHub 게시 token과 Slack Incoming Webhook URL은 이 서비스만 읽을 수 있는 SSM SecureString으로 보관한다. 프로젝트 배포 운영자가 정확히 두 값을 운영 환경에 주입하며, 실제 값은 공개 저장소와 Terraform state에 넣지 않는다. Terraform은 값이나 parameter resource를 소유하지 않고, 입력받은 정확한 두 parameter ARN에 대한 `ssm:GetParameter` 권한만 Lambda 역할에 부여한다.
+
 PILO 저장소에 잘못 커밋된 이전 설계 문서의 제거는 이 설계를 새 저장소에 안전하게 커밋하고 사용자가 검토한 뒤 수행할 별도 작업이다. 이 저장소의 설계 작업에는 그 삭제가 포함되지 않는다.
 
 ### `pilo-topology.yaml` 계약
@@ -71,7 +73,7 @@ CloudWatch Alarm
 1. EventBridge가 CloudWatch Alarm 이벤트를 Lambda로 전달한다.
 2. Lambda가 Incident ID를 정하고 DynamoDB에서 이벤트 처리 상태를 확인하거나 선점한다.
 3. 결정적 Collector들이 정의된 기본 Snapshot을 수집한다. Collector 일부가 실패해도 성공한 결과와 실패 정보를 함께 유지한다.
-4. 제한된 Agent가 기본 Snapshot을 보고 허용된 추가 read-only Tool 중 필요한 것만 선택한다. Agent를 호출할 수 없거나 제한 시간 안에 끝나지 않으면 기본 Snapshot만 사용한다.
+4. AWS Bedrock 기반의 제한된 Agent가 기본 Snapshot을 보고 허용된 추가 read-only Tool 중 필요한 것만 선택한다. Agent를 호출할 수 없거나 제한 시간 안에 끝나지 않으면 기본 Snapshot만 사용한다. Bedrock model 또는 inference profile ID는 배포 입력으로 받고 IAM으로 호출 대상을 제한한다.
 5. 수집 결과와 Agent 산출물을 redaction하여 민감 정보가 영속 저장소나 게시 채널로 나가지 않게 한다.
 6. redacted Incident Bundle을 private S3에 먼저 저장한다. 이 저장이 성공해야 외부 게시를 진행한다.
 7. Bundle을 바탕으로 private incident 저장소에 GitHub Issue를 생성하거나 기존 Incident ID의 게시를 재개한다.
@@ -180,7 +182,7 @@ GitHub 실패 시의 degraded Slack 알림은 정상 Slack 형식의 예외다. 
 
 ### 절대 금지
 
-- Secrets Manager `GetSecretValue`
+- Secrets Manager `GetSecretValue`와 PILO 애플리케이션 Secret 값 조회
 - PILO 애플리케이션 및 조사 대상 AWS 리소스를 변경하는 API. 서비스 소유 private S3의 Bundle 저장, DynamoDB 상태 기록, 전용 로그 기록은 여기에 해당하지 않으며 별도의 최소 쓰기 권한으로 제한한다.
 - 자동 재시작, 롤백, 복구 또는 배포
 - topology 허용 목록 밖 임의 리소스 조회
@@ -188,6 +190,8 @@ GitHub 실패 시의 degraded Slack 알림은 정상 Slack 형식의 예외다. 
 - 실제 Bundle의 공개 S3 저장 또는 실제 Incident의 공개 Issue 생성
 
 IAM은 조회 대상별 최소 read-only 권한과 서비스 소유 자원에 대한 쓰기 권한을 분리한다. Lambda는 필요한 PILO 상태 조회, 전용 private S3 쓰기, DynamoDB checkpoint, 전용 로그 기록, 승인된 게시 연동 외 권한을 갖지 않는다. redaction 이전 데이터는 처리 중 메모리와 서비스 신뢰 경계를 벗어나 영속화하지 않는다. 로그에도 원문 증거 전체나 민감 값을 남기지 않는다.
+
+GitHub·Slack 연동 adapter만 서비스 전용 GitHub token과 Slack Webhook URL을 SSM `GetParameter`의 복호화 옵션으로 읽을 수 있다. GitHub adapter는 배포·변경 파일 read와 private Issue write에 token을 사용하고, Slack adapter는 Webhook 전송에만 URL을 사용한다. 두 자격 증명은 조사 Evidence나 Agent 입력에 노출하지 않고 해당 adapter 메모리 안에서 요청을 만드는 데만 사용한다. SSM parameter 이름·ARN은 비밀이 아니지만 값은 로그, 오류, Bundle, Issue, Slack, 테스트 fixture, Terraform plan/state에 포함하지 않는다. Agent는 AWS Bedrock을 IAM 인증으로 호출하므로 별도 모델 API key를 사용하지 않는다.
 
 ## 12. 배포와 운영 형태
 
@@ -200,7 +204,7 @@ Terraform은 다음 서비스 소유 자원만 관리한다.
 - 최소 권한 IAM
 - 전용 CloudWatch log group
 
-PILO의 ECS, ALB, RDS, SQS 등 애플리케이션 자원은 data source 또는 입력 식별자로만 참조하고 생성·변경하지 않는다. 서비스는 Alarm 시 실행되는 Lambda 기반이며 Docker와 상시 서버를 사용하지 않는다. 이 저장소는 PILO와 별도의 Terraform state, IAM, CI/CD를 유지한다.
+PILO의 ECS, ALB, RDS, SQS 등 애플리케이션 자원은 data source 또는 입력 식별자로만 참조하고 생성·변경하지 않는다. SSM SecureString의 실제 값과 parameter resource는 Terraform state에 넣지 않으며, Terraform에는 정확한 두 parameter ARN만 입력한다. 서비스는 Alarm 시 실행되는 Lambda 기반이며 Docker와 상시 서버를 사용하지 않는다. 이 저장소는 PILO와 별도의 Terraform state, IAM, CI/CD를 유지한다.
 
 ## 13. 평가 설계
 
@@ -261,7 +265,7 @@ Incident Brief의 가치는 예쁜 요약이 아니라 후속 조사량을 줄�
 
 ## 15. 설계 수용 기준
 
-구현 계획으로 넘어가기 전에 사용자가 이 문서를 검토하고 승인해야 한다. 이후 구현은 최소한 다음 조건을 증명해야 한다.
+이 문서는 2026-08-01에 사용자 승인을 받았다. 이후 구현은 최소한 다음 조건을 증명해야 한다.
 
 - 허용 목록 밖 조회와 모든 변경 API가 코드 및 IAM 양쪽에서 차단된다.
 - `GetSecretValue`를 호출하지 않고 실제 Secret 값이 Bundle·Issue·Slack·로그에 남지 않는다.
@@ -272,4 +276,4 @@ Incident Brief의 가치는 예쁜 요약이 아니라 후속 조사량을 줄�
 - 21개 익명화 fixture로 snapshot/hybrid 및 handoff A/B 지표를 재현할 수 있다.
 - 공개 저장소에는 실제 장애 로그, Secret, 자격 증명, 실제 운영 topology가 없다.
 
-이 문서 승인 전에는 구현 계획, 코드, Terraform, CI/CD 또는 dependency scaffold를 만들지 않는다.
+구현 계획이 별도 사용자 검토를 통과하기 전에는 코드, Terraform, CI/CD 또는 dependency scaffold를 만들지 않는다.

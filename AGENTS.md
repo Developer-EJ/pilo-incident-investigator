@@ -8,15 +8,15 @@ CloudWatch를 대체하거나 모든 장애의 원인을 진단하는 범용 플
 
 ## 현재 단계
 
-- 현재는 **Design phase**다.
-- 사용자 설계 승인 전에는 구현 계획 작성, 애플리케이션 코드, Terraform 리소스, CI workflow, dependency scaffold를 추가하지 않는다.
+- 현재는 **Planning phase**다. 설계는 2026-08-01에 사용자 승인을 받았다.
+- 사용자 구현 계획 승인 전에는 애플리케이션 코드, Terraform 리소스, CI workflow, dependency scaffold를 추가하지 않는다.
 - 설계의 기준 문서는 `docs/design.md`다.
 
 ## 보안 및 안전 금지사항
 
 다음 항목은 어떤 구현에서도 절대 허용하지 않는다.
 
-- AWS Secrets Manager `GetSecretValue` 호출 또는 Secret 값 수집·출력·저장
+- AWS Secrets Manager `GetSecretValue` 호출 또는 PILO 애플리케이션 Secret 값 수집·출력·저장
 - PILO 애플리케이션 및 조사 대상 AWS 리소스를 생성·변경·삭제하는 런타임 API 호출. 단, 서비스가 소유하는 private S3에 Bundle을 쓰고 DynamoDB에 처리 상태를 기록하며 전용 로그를 남기는 동작은 설계된 저장 책임이다.
 - 자동 재시작, 롤백, 배포, 복구 또는 기타 운영 변경
 - `pilo-topology.yaml`의 운영 허용 목록 밖 리소스 조회
@@ -25,6 +25,8 @@ CloudWatch를 대체하거나 모든 장애의 원인을 진단하는 범용 플
 - Incident Bundle 또는 실제 Incident Issue의 공개 게시
 
 런타임 권한은 PILO 조회에 필요한 최소 read-only 권한과 이 서비스가 소유하는 private S3·DynamoDB·로그 기록 및 게시 연동에 필요한 최소 쓰기 권한으로 분리한다. PILO 애플리케이션 리소스는 관찰 대상일 뿐 이 저장소의 Terraform 소유 대상이 아니다.
+
+GitHub 게시 token과 Slack Incoming Webhook URL은 서비스 전용 SSM SecureString으로만 제공한다. 두 값은 조사 Evidence가 아니며 Bundle·Issue·Slack 본문·애플리케이션 로그·Git·Terraform state에 기록하지 않는다. Agent 모델은 AWS Bedrock을 사용하고 IAM으로 호출을 제한한다.
 
 ## 구현 범위
 
