@@ -302,6 +302,50 @@ def test_escaped_quoted_assignment_removes_the_entire_value(value: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("value", "key"),
+    [
+        ('password="hunter\nsecond tail"', "password"),
+        ("secret='hunter\nsecond tail'", "secret"),
+        ('password="hunter\\\nsecond tail"', "password"),
+        ("secret='hunter\\\nsecond tail'", "secret"),
+    ],
+)
+def test_closed_multiline_quoted_assignment_is_fully_redacted(value: str, key: str) -> None:
+    redacted, report = Redactor().redact_text(value)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert redacted == f"{key}=[REDACTED:CREDENTIAL]"
+    assert "hunter" not in redacted
+    assert "tail" not in redacted
+    assert report.categories == (("CREDENTIAL_ASSIGNMENT", 1),)
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "key"),
+    [
+        ('password="hunter\nsecond tail', "password"),
+        ("secret='hunter\nsecond tail", "secret"),
+        ('password="hunter\\\nsecond tail', "password"),
+        ("secret='hunter\\\nsecond tail", "secret"),
+        ('password="hunter\nsecond tail\\', "password"),
+        ("secret='hunter\nsecond tail\\", "secret"),
+    ],
+)
+def test_unclosed_multiline_quoted_assignment_redacts_through_end(value: str, key: str) -> None:
+    redacted, report = Redactor().redact_text(value)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert redacted == f"{key}=[REDACTED:CREDENTIAL]"
+    assert "hunter" not in redacted
+    assert "tail" not in redacted
+    assert report.categories == (("CREDENTIAL_ASSIGNMENT", 1),)
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "basic snapshot status",

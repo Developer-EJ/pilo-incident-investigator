@@ -94,8 +94,11 @@ _QUERY_CREDENTIAL = re.compile(
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})\s*[=:]\s*"
     r"(?![A-Za-z][A-Za-z0-9_.-]{0,127}\s*[=:])"
-    r"""(?P<value>(?!\[REDACTED:)(?:"(?:\\.|[^"\\\r\n])*"|"""
-    r"'(?:\\.|[^'\\\r\n])*'|[^\s,;]+))"
+    r"""(?P<value>(?!\[REDACTED:)(?:"(?:\\[\s\S]|[^"\\])*"|"""
+    r"'(?:\\[\s\S]|[^'\\])*'|"
+    r""""(?:\\[\s\S]|[^"\\])*(?:\\)?\Z|"""
+    r"'(?:\\[\s\S]|[^'\\])*(?:\\)?\Z|"
+    r"""[^"'\s,;]+))"""
 )
 _SENSITIVE_SINGLE_TOKENS = frozenset(
     {"password", "passwd", "secret", "token", "authorization", "credential", "credentials"}
