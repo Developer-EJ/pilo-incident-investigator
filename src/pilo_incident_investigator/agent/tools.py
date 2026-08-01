@@ -56,5 +56,6 @@ class ToolRegistry:
             topology.require_allowed(_RESOURCE_TYPES[request.tool], request.resource_key)
         except TopologyDenied:
             raise ToolDenied("Tool resource is not allowlisted") from None
+        result = self._handlers[request.tool].execute(request)
         seen.add(key)
-        return self._handlers[request.tool].execute(request)
+        return result

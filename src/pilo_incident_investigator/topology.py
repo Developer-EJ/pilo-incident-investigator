@@ -43,6 +43,7 @@ class ServiceTopology:
     log_groups: tuple[str, ...]
     target_groups: tuple[str, ...]
     rds_instances: tuple[str, ...]
+    secrets: tuple[str, ...]
     queues: tuple[str, ...]
     github_repository: str
 
@@ -128,6 +129,7 @@ def _parse_service(raw: Any) -> ServiceTopology:
         "log_groups",
         "target_groups",
         "rds_instances",
+        "secrets",
         "queues",
         "github_repository",
     }
@@ -140,6 +142,7 @@ def _parse_service(raw: Any) -> ServiceTopology:
         log_groups=_require_string_tuple(raw.get("log_groups"), "log_groups"),
         target_groups=_require_string_tuple(raw.get("target_groups"), "target_groups"),
         rds_instances=_require_string_tuple(raw.get("rds_instances"), "rds_instances"),
+        secrets=_require_string_tuple(raw.get("secrets"), "secrets"),
         queues=_require_string_tuple(raw.get("queues"), "queues"),
         github_repository=_require_string(raw.get("github_repository"), "github_repository"),
     )
@@ -171,6 +174,7 @@ def _build_allowed_resources(
         "log_group": frozenset(item for service in services for item in service.log_groups),
         "target_group": frozenset(item for service in services for item in service.target_groups),
         "rds_instance": frozenset(item for service in services for item in service.rds_instances),
+        "secret": frozenset(item for service in services for item in service.secrets),
         "queue": frozenset(item for service in services for item in service.queues),
         "github_repository": frozenset(service.github_repository for service in services),
     }
@@ -182,6 +186,7 @@ def _reject_duplicate_service_resources(services: tuple[ServiceTopology, ...]) -
         "log_group": [item for service in services for item in service.log_groups],
         "target_group": [item for service in services for item in service.target_groups],
         "rds_instance": [item for service in services for item in service.rds_instances],
+        "secret": [item for service in services for item in service.secrets],
         "queue": [item for service in services for item in service.queues],
         "github_repository": [service.github_repository for service in services],
     }

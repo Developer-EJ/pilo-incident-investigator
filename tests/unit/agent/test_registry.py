@@ -96,6 +96,36 @@ def test_successful_request_is_executed_once_and_marked_seen() -> None:
     assert seen == {request.deduplication_key()}
 
 
+def test_secret_metadata_request_uses_explicit_topology_allowlist() -> None:
+    selected_handlers = handlers()
+    registry = ToolRegistry(selected_handlers)
+    request = request_for(
+        tool="secret_rotation_metadata",
+        resource_key="pilo-dev-secret-01",
+    )
+
+    registry.execute(request, topology(), set())
+
+    assert selected_handlers["secret_rotation_metadata"].requests == [request]
+
+
+def test_failed_handler_does_not_mark_request_seen() -> None:
+    class FailingHandler(RecordingHandler):
+        def execute(self, request: ToolRequest) -> ToolResult:
+            raise RuntimeError("tool failed")
+
+    selected_handlers = handlers()
+    selected_handlers["sqs_status"] = FailingHandler()
+    registry = ToolRegistry(selected_handlers)
+    request = request_for()
+    seen: set[str] = set()
+
+    with pytest.raises(RuntimeError, match="tool failed"):
+        registry.execute(request, topology(), seen)
+
+    assert seen == set()
+
+
 def test_deduplication_key_uses_canonical_request_fields_only() -> None:
     first = ToolRequest(
         tool="sqs_status",

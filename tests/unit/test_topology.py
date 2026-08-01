@@ -90,8 +90,8 @@ def test_duplicate_service_resources_are_rejected() -> None:
         Topology.load(text)
 
 
-@pytest.mark.parametrize("field", ["rds_instances", "queues"])
-def test_duplicate_rds_and_queue_resources_are_rejected(field: str) -> None:
+@pytest.mark.parametrize("field", ["rds_instances", "secrets", "queues"])
+def test_duplicate_extended_resources_are_rejected(field: str) -> None:
     raw = yaml.safe_load((FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8"))
     raw["services"][1][field] = raw["services"][0][field]
 
