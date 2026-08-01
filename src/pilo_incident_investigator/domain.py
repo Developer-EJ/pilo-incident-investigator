@@ -125,6 +125,7 @@ class Investigation:
     missing: tuple[str, ...]
     classification: str
     tool_calls: tuple[ToolResult, ...]
+    classification_evidence_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

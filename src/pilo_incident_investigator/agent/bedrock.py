@@ -3,7 +3,7 @@
 import json
 from typing import Any, Protocol, cast
 
-from pilo_incident_investigator.agent.contracts import AgentProposal
+from pilo_incident_investigator.agent.contracts import AgentProposal, cites_available_evidence
 from pilo_incident_investigator.agent.tools import TOOL_NAMES
 from pilo_incident_investigator.domain import (
     Evidence,
@@ -77,7 +77,7 @@ class BedrockPlanner:
         }
         raw = self._converse(
             "Return one JSON object with tool_requests, facts, directions, missing, and "
-            "classification. Cite only supplied Evidence IDs.",
+            "a classification object with value and evidence_ids. Cite only supplied Evidence IDs.",
             payload,
         )
         return _decode_proposal(
@@ -89,28 +89,33 @@ class BedrockPlanner:
         snapshot: Snapshot,
         tool_results: tuple[ToolResult, ...] = (),
     ) -> Investigation:
-        evidence = _all_evidence(snapshot, tool_results)
-        payload: dict[str, JsonValue] = {
-            "snapshot_evidence": [_encode_evidence(item) for item in snapshot.evidence],
-            "prior_tool_evidence": [
-                _encode_evidence(item) for result in tool_results for item in result.evidence
-            ],
-        }
-        raw = self._converse(
-            "Return one JSON object with facts, directions, missing, and classification. "
-            "Cite only supplied Evidence IDs. Do not request tools.",
-            payload,
-        )
-        facts, directions, missing, classification = _decode_summary(
-            raw, frozenset(item.evidence_id for item in evidence)
-        )
-        return Investigation(
-            facts=facts,
-            directions=directions,
-            missing=missing,
-            classification=classification,
-            tool_calls=tool_results,
-        )
+        try:
+            evidence = _all_evidence(snapshot, tool_results)
+            payload: dict[str, JsonValue] = {
+                "snapshot_evidence": [_encode_evidence(item) for item in snapshot.evidence],
+                "prior_tool_evidence": [
+                    _encode_evidence(item) for result in tool_results for item in result.evidence
+                ],
+            }
+            raw = self._converse(
+                "Return one JSON object with facts, directions, missing, and a classification "
+                "object with value and evidence_ids. Cite only supplied Evidence IDs. "
+                "Do not request tools.",
+                payload,
+            )
+            facts, directions, missing, classification, classification_evidence_ids = (
+                _decode_summary(raw, frozenset(item.evidence_id for item in evidence))
+            )
+            return Investigation(
+                facts=facts,
+                directions=directions,
+                missing=missing,
+                classification=classification,
+                tool_calls=tool_results,
+                classification_evidence_ids=classification_evidence_ids,
+            )
+        except Exception:
+            return _fallback_investigation(snapshot, tool_results)
 
     def _converse(self, instruction: str, payload: dict[str, JsonValue]) -> object:
         response = self._client.converse(
@@ -161,6 +166,22 @@ def _encode_evidence(evidence: Evidence) -> dict[str, JsonValue]:
     }
 
 
+def _fallback_investigation(
+    snapshot: Snapshot, tool_results: tuple[ToolResult, ...]
+) -> Investigation:
+    missing: tuple[str, ...] = ("추가 조사를 완료하지 못했습니다.",)
+    if snapshot.failures:
+        missing += (f"기본 Snapshot 수집 실패 {len(snapshot.failures)}건이 있습니다.",)
+    return Investigation(
+        facts=(),
+        directions=(),
+        missing=missing,
+        classification="unclassified",
+        tool_calls=tool_results,
+        classification_evidence_ids=(),
+    )
+
+
 def _decode_proposal(
     raw: object, allowed_evidence: frozenset[str], remaining_budget: int
 ) -> AgentProposal:
@@ -178,8 +199,17 @@ def _decode_proposal(
     facts = _decode_statements(row["facts"], allowed_evidence, "facts")
     directions = _decode_statements(row["directions"], allowed_evidence, "directions")
     missing = _decode_missing(row["missing"])
-    classification = _non_empty_string(row["classification"], "classification")
-    return AgentProposal(requests, facts, directions, missing, classification)
+    classification, classification_evidence_ids = _decode_classification(
+        row["classification"], allowed_evidence
+    )
+    return AgentProposal(
+        requests,
+        facts,
+        directions,
+        missing,
+        classification,
+        classification_evidence_ids,
+    )
 
 
 def _decode_summary(
@@ -189,14 +219,33 @@ def _decode_summary(
     tuple[SupportedStatement, ...],
     tuple[str, ...],
     str,
+    tuple[str, ...],
 ]:
     row = _exact_mapping(raw, {"facts", "directions", "missing", "classification"}, "summary")
     return (
         _decode_statements(row["facts"], allowed_evidence, "facts"),
         _decode_statements(row["directions"], allowed_evidence, "directions"),
         _decode_missing(row["missing"]),
-        _non_empty_string(row["classification"], "classification"),
+        *_decode_classification(row["classification"], allowed_evidence),
     )
+
+
+def _decode_classification(
+    raw: object, allowed_evidence: frozenset[str]
+) -> tuple[str, tuple[str, ...]]:
+    row = _exact_mapping(raw, {"value", "evidence_ids"}, "classification")
+    value = _non_empty_string(row["value"], "classification value")
+    citations = row["evidence_ids"]
+    if not isinstance(citations, list) or any(
+        not isinstance(item, str) or not item for item in citations
+    ):
+        raise PlannerOutputError("classification citations are invalid")
+    evidence_ids = tuple(cast(list[str], citations))
+    if len(evidence_ids) != len(set(evidence_ids)) or not set(evidence_ids) <= allowed_evidence:
+        raise PlannerOutputError("classification cites unavailable Evidence")
+    if value != "unclassified" and not evidence_ids:
+        raise PlannerOutputError("classified output requires Evidence citations")
+    return value, evidence_ids
 
 
 def _decode_request(raw: object, allowed_evidence: frozenset[str]) -> ToolRequest:
@@ -206,7 +255,7 @@ def _decode_request(raw: object, allowed_evidence: frozenset[str]) -> ToolReques
         raise PlannerOutputError("unknown Tool")
     resource_key = _non_empty_string(row["resource_key"], "resource_key")
     reason = _non_empty_string(row["reason"], "reason")
-    if not any(evidence_id in reason for evidence_id in allowed_evidence):
+    if not cites_available_evidence(reason, allowed_evidence):
         raise PlannerOutputError("Tool selection reason must cite available Evidence")
     parameters = row["parameters"]
     if not isinstance(parameters, dict) or any(not isinstance(key, str) for key in parameters):

@@ -1,9 +1,14 @@
 """Bounded, fail-closed orchestration for additional incident investigation."""
 
 from pilo_incident_investigator.agent.bedrock import Planner
-from pilo_incident_investigator.agent.contracts import AgentProposal
+from pilo_incident_investigator.agent.contracts import AgentProposal, cites_available_evidence
 from pilo_incident_investigator.agent.tools import ToolRegistry
-from pilo_incident_investigator.domain import Investigation, Snapshot, ToolResult
+from pilo_incident_investigator.domain import (
+    Investigation,
+    Snapshot,
+    SupportedStatement,
+    ToolResult,
+)
 from pilo_incident_investigator.topology import Topology
 
 MAX_ROUNDS = 2
@@ -30,6 +35,8 @@ class InvestigationAgent:
                 return _fallback(snapshot, tuple(executed))
 
             if not proposal.tool_requests:
+                if executed:
+                    return self._finalize(snapshot, tuple(executed))
                 return _investigation(proposal, tuple(executed))
 
             try:
@@ -38,7 +45,15 @@ class InvestigationAgent:
             except Exception:
                 return _fallback(snapshot, tuple(executed))
 
-        return _investigation(proposal, tuple(executed))
+        return self._finalize(snapshot, tuple(executed))
+
+    def _finalize(self, snapshot: Snapshot, tool_calls: tuple[ToolResult, ...]) -> Investigation:
+        try:
+            investigation = self._planner.summarize(snapshot, tool_calls)
+            _validate_investigation(investigation, snapshot, tool_calls)
+            return investigation
+        except Exception:
+            return _fallback(snapshot, tool_calls)
 
 
 def _validate_proposal(
@@ -58,14 +73,70 @@ def _validate_proposal(
         raise ValueError("classification is invalid")
     if any(not isinstance(item, str) or not item.strip() for item in proposal.missing):
         raise ValueError("missing information is invalid")
-    allowed = {item.evidence_id for item in snapshot.evidence}
-    allowed.update(item.evidence_id for result in prior_results for item in result.evidence)
+    allowed = _allowed_evidence(snapshot, prior_results)
     for request in proposal.tool_requests:
-        if not any(evidence_id in request.reason for evidence_id in allowed):
+        if not cites_available_evidence(request.reason, allowed):
             raise ValueError("Tool selection reason does not cite available Evidence")
-    for statement in proposal.facts + proposal.directions:
-        if not statement.evidence_ids or not set(statement.evidence_ids) <= allowed:
+    _validate_supported_output(
+        proposal.facts,
+        proposal.directions,
+        proposal.classification,
+        proposal.classification_evidence_ids,
+        allowed,
+    )
+
+
+def _validate_investigation(
+    investigation: Investigation,
+    snapshot: Snapshot,
+    tool_calls: tuple[ToolResult, ...],
+) -> None:
+    if not isinstance(investigation, Investigation):
+        raise TypeError("planner returned an invalid Investigation")
+    if investigation.tool_calls != tool_calls:
+        raise ValueError("final synthesis changed completed Tool calls")
+    if any(not isinstance(item, str) or not item.strip() for item in investigation.missing):
+        raise ValueError("missing information is invalid")
+    _validate_supported_output(
+        investigation.facts,
+        investigation.directions,
+        investigation.classification,
+        investigation.classification_evidence_ids,
+        _allowed_evidence(snapshot, tool_calls),
+    )
+
+
+def _validate_supported_output(
+    facts: tuple[object, ...],
+    directions: tuple[object, ...],
+    classification: object,
+    classification_evidence_ids: tuple[str, ...],
+    allowed: set[str],
+) -> None:
+    if not isinstance(classification, str) or not classification.strip():
+        raise ValueError("classification is invalid")
+    if (
+        any(not isinstance(item, str) or not item for item in classification_evidence_ids)
+        or len(classification_evidence_ids) != len(set(classification_evidence_ids))
+        or not set(classification_evidence_ids) <= allowed
+    ):
+        raise ValueError("classification citations are invalid")
+    if classification != "unclassified" and not classification_evidence_ids:
+        raise ValueError("classified output requires Evidence citations")
+    for statement in facts + directions:
+        if (
+            not isinstance(statement, SupportedStatement)
+            or not statement.evidence_ids
+            or len(statement.evidence_ids) != len(set(statement.evidence_ids))
+            or not set(statement.evidence_ids) <= allowed
+        ):
             raise ValueError("statement cites unavailable Evidence")
+
+
+def _allowed_evidence(snapshot: Snapshot, tool_results: tuple[ToolResult, ...]) -> set[str]:
+    return {item.evidence_id for item in snapshot.evidence}.union(
+        item.evidence_id for result in tool_results for item in result.evidence
+    )
 
 
 def _investigation(proposal: AgentProposal, tool_calls: tuple[ToolResult, ...]) -> Investigation:
@@ -75,6 +146,7 @@ def _investigation(proposal: AgentProposal, tool_calls: tuple[ToolResult, ...]) 
         missing=proposal.missing,
         classification=proposal.classification,
         tool_calls=tool_calls,
+        classification_evidence_ids=proposal.classification_evidence_ids,
     )
 
 
@@ -88,4 +160,5 @@ def _fallback(snapshot: Snapshot, tool_calls: tuple[ToolResult, ...]) -> Investi
         missing=missing,
         classification="unclassified",
         tool_calls=tool_calls,
+        classification_evidence_ids=(),
     )

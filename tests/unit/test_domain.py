@@ -58,6 +58,7 @@ def test_incident_bundle_contract_is_frozen() -> None:
         missing=("stopped task reason",),
         classification="unclassified",
         tool_calls=(result,),
+        classification_evidence_ids=("E-001",),
     )
     bundle = IncidentBundle(
         incident_id="inc-123",
@@ -69,6 +70,7 @@ def test_incident_bundle_contract_is_frozen() -> None:
     )
 
     assert bundle.investigation.facts[0].evidence_ids == ("E-001",)
+    assert bundle.investigation.classification_evidence_ids == ("E-001",)
     with pytest.raises(FrozenInstanceError):
         bundle.incident_id = "inc-changed"  # type: ignore[misc]
 

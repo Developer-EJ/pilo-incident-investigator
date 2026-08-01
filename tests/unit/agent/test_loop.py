@@ -22,10 +22,18 @@ from pilo_incident_investigator.topology import Topology
 
 
 class ScriptedPlanner:
-    def __init__(self, outputs: Sequence[AgentProposal | BaseException]) -> None:
+    def __init__(
+        self,
+        outputs: Sequence[AgentProposal | BaseException],
+        *,
+        summary: Investigation | BaseException | None = None,
+    ) -> None:
         self.outputs = list(outputs)
+        self.summary = summary
         self.call_count = 0
         self.remaining_budgets: list[int] = []
+        self.summarize_count = 0
+        self.summarized_results: tuple[ToolResult, ...] = ()
 
     def propose(
         self,
@@ -43,8 +51,22 @@ class ScriptedPlanner:
 
     def summarize(
         self, snapshot: Snapshot, tool_results: tuple[ToolResult, ...] = ()
-    ) -> Investigation:  # pragma: no cover - the loop must not use this path
-        raise AssertionError((snapshot, tool_results))
+    ) -> Investigation:
+        self.summarize_count += 1
+        self.summarized_results = tool_results
+        if isinstance(self.summary, BaseException):
+            raise self.summary
+        if self.summary is not None:
+            return self.summary
+        citation = tool_results[-1].evidence[-1].evidence_id
+        return Investigation(
+            facts=(SupportedStatement("final tool-supported fact", (citation,)),),
+            directions=(SupportedStatement("follow the final evidence", (citation,)),),
+            missing=(),
+            classification="tool_supported",
+            tool_calls=tool_results,
+            classification_evidence_ids=(citation,),
+        )
 
 
 class RecordingHandler(ToolHandler):
@@ -98,13 +120,19 @@ def request(tool: str, resource_key: str, index: int) -> ToolRequest:
     )
 
 
-def proposal(*requests: ToolRequest, citation: str = "E-001") -> AgentProposal:
+def proposal(
+    *requests: ToolRequest,
+    citation: str = "E-001",
+    classification: str = "unclassified",
+    classification_evidence_ids: tuple[str, ...] = (),
+) -> AgentProposal:
     return AgentProposal(
         tool_requests=requests,
         facts=(SupportedStatement("service is stopped", (citation,)),),
         directions=(SupportedStatement("inspect service logs", (citation,)),),
         missing=("application failure reason",),
-        classification="unclassified",
+        classification=classification,
+        classification_evidence_ids=classification_evidence_ids,
     )
 
 
@@ -141,6 +169,52 @@ def test_agent_executes_at_most_two_rounds_and_six_tools() -> None:
     assert len(handler.requests) == 6
     assert planner.call_count == 2
     assert planner.remaining_budgets == [6, 3]
+    assert planner.summarize_count == 1
+    assert len(planner.summarized_results) == 6
+    assert result.facts == (
+        SupportedStatement("final tool-supported fact", ("T-github_changed_files-6",)),
+    )
+
+
+def test_agent_finalizes_once_after_tools_when_later_proposal_requests_none() -> None:
+    valid = topology()
+    planner = ScriptedPlanner(
+        [
+            proposal(request("sqs_status", valid.services[0].queues[0], 1)),
+            proposal(),
+        ]
+    )
+    tools, handler = registry()
+
+    result = InvestigationAgent(planner, tools).run(snapshot(), valid)
+
+    assert planner.call_count == 2
+    assert planner.summarize_count == 1
+    assert len(handler.requests) == 1
+    assert result.facts[0].evidence_ids == ("T-sqs_status-1",)
+    assert result.classification_evidence_ids == ("T-sqs_status-1",)
+
+
+def test_agent_falls_back_if_final_synthesis_fails_and_preserves_tools() -> None:
+    valid = topology()
+    planner = ScriptedPlanner(
+        [
+            proposal(request("sqs_status", valid.services[0].queues[0], 1)),
+            proposal(),
+        ],
+        summary=RuntimeError("raw final synthesis failure"),
+    )
+    tools, handler = registry()
+
+    result = InvestigationAgent(planner, tools).run(snapshot(), valid)
+
+    assert planner.call_count == 2
+    assert planner.summarize_count == 1
+    assert len(handler.requests) == 1
+    assert len(result.tool_calls) == 1
+    assert result.classification == "unclassified"
+    assert result.classification_evidence_ids == ()
+    assert "raw final" not in repr(result)
 
 
 @pytest.mark.parametrize(
@@ -245,6 +319,44 @@ def test_agent_rejects_invalid_statement_citation_before_tool_execution() -> Non
     assert handler.requests == []
 
 
+def test_agent_rejects_tool_reason_evidence_prefix_collision() -> None:
+    valid = topology()
+    bad_request = ToolRequest(
+        tool="sqs_status",
+        resource_key=valid.services[0].queues[0],
+        parameters={},
+        reason="E-0010 is not current Evidence",
+    )
+    planner = ScriptedPlanner([proposal(bad_request)])
+    tools, handler = registry()
+
+    result = InvestigationAgent(planner, tools).run(snapshot(), valid)
+
+    assert result.classification == "unclassified"
+    assert result.tool_calls == ()
+    assert handler.requests == []
+
+
+@pytest.mark.parametrize("citation_ids", [(), ("E-999",)])
+def test_agent_rejects_classification_without_current_evidence(
+    citation_ids: tuple[str, ...],
+) -> None:
+    planner = ScriptedPlanner(
+        [
+            proposal(
+                classification="ecs_oom",
+                classification_evidence_ids=citation_ids,
+            )
+        ]
+    )
+    tools, _ = registry()
+
+    result = InvestigationAgent(planner, tools).run(snapshot(), topology())
+
+    assert result.classification == "unclassified"
+    assert result.classification_evidence_ids == ()
+
+
 def test_agent_returns_successful_evidence_backed_no_tool_investigation() -> None:
     planner = ScriptedPlanner([proposal()])
     tools, handler = registry()
@@ -254,6 +366,7 @@ def test_agent_returns_successful_evidence_backed_no_tool_investigation() -> Non
     assert result.facts == (SupportedStatement("service is stopped", ("E-001",)),)
     assert result.directions == (SupportedStatement("inspect service logs", ("E-001",)),)
     assert result.classification == "unclassified"
+    assert result.classification_evidence_ids == ()
     assert result.tool_calls == ()
     assert handler.requests == []
     assert planner.call_count == 1
