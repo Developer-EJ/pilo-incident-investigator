@@ -76,6 +76,24 @@ def _bundle_with_secrets() -> IncidentBundle:
     )
 
 
+def _safe_bundle() -> IncidentBundle:
+    evidence = Evidence("E-001", "ecs", NOW, "running=0", {"running": 0})
+    return IncidentBundle(
+        incident_id="inc-safe",
+        alarm=AlarmEvent("evt-safe", "synthetic", "alarm", NOW, {"state": "ALARM"}),
+        snapshot=Snapshot("inc-safe", (evidence,), ()),
+        investigation=Investigation(
+            facts=(SupportedStatement("running count observed", ("E-001",)),),
+            directions=(),
+            missing=(),
+            classification="unclassified",
+            tool_calls=(),
+        ),
+        created_at=NOW,
+        metadata={},
+    )
+
+
 @pytest.mark.parametrize(
     ("secret", "category"),
     [
@@ -84,9 +102,14 @@ def _bundle_with_secrets() -> IncidentBundle:
         ("github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz", "GITHUB_TOKEN"),
         ("password=hunter2", "CREDENTIAL_ASSIGNMENT"),
         ("AKIAABCDEFGHIJKLMNOP", "AWS_ACCESS_KEY"),
+        ("ASIAABCDEFGHIJKLMNOP", "AWS_ACCESS_KEY"),
         ("Authorization: Bearer abc.def.ghi", "AUTHORIZATION"),
+        ("Bearer standalone-token", "AUTHORIZATION"),
+        ("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", "AUTHORIZATION"),
         ("https://hooks.slack.com/services/T000/B000/WEBHOOK", "WEBHOOK_URL"),
         ("https://example.invalid/path?access_token=query-secret", "QUERY_CREDENTIAL"),
+        ("https://example.invalid/path?clientSecret=query-secret", "QUERY_CREDENTIAL"),
+        ('password="hunter two"', "CREDENTIAL_ASSIGNMENT"),
     ],
 )
 def test_redact_text_removes_each_credential_shape(secret: str, category: str) -> None:
@@ -132,6 +155,65 @@ def test_query_token_is_counted_once_and_remains_idempotent() -> None:
     redacted_again, second_report = Redactor().redact_text(redacted)
 
     assert report.replacements == 1
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "client_secret",
+        "clientSecret",
+        "access_token",
+        "aws_secret_access_key",
+        "x-api-key",
+        "api-key",
+        "api_key",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "authorization",
+        "webhook_url",
+        "private_key",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+    ],
+)
+def test_sensitive_key_normalization_redacts_opaque_values(key: str) -> None:
+    bundle = _safe_bundle()
+    bundle.metadata[key] = "opaque value with spaces"
+
+    redacted, report = Redactor().redact_bundle(bundle)
+
+    assert redacted.metadata[key] == "[REDACTED:SENSITIVE_FIELD]"
+    assert report.categories == (("SENSITIVE_FIELD", 1),)
+
+
+def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> None:
+    bundle = _safe_bundle()
+    bundle.metadata["clientSecret"] = {
+        "first": "opaque-one",
+        "nested": ["opaque-two", 3, False, None, {"last": "[REDACTED:SENSITIVE_FIELD]"}],
+    }
+
+    redacted, report = Redactor().redact_bundle(bundle)
+    redacted_again, second_report = Redactor().redact_bundle(redacted)
+
+    assert redacted.metadata["clientSecret"] == {
+        "first": "[REDACTED:SENSITIVE_FIELD]",
+        "nested": [
+            "[REDACTED:SENSITIVE_FIELD]",
+            3,
+            False,
+            None,
+            {"last": "[REDACTED:SENSITIVE_FIELD]"},
+        ],
+    }
+    assert report.categories == (("SENSITIVE_FIELD", 2),)
     assert redacted_again == redacted
     assert second_report.replacements == 0
 

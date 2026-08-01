@@ -1,9 +1,14 @@
 """Evidence validation and the human-readable incident brief."""
 
+import html
 from collections.abc import Collection
 
 from pilo_incident_investigator.domain import IncidentBundle, Investigation, SupportedStatement
-from pilo_incident_investigator.redaction import Redactor, UnsafeBundleError
+from pilo_incident_investigator.redaction import (
+    Redactor,
+    UnsafeBundleError,
+    is_safe_structural_id,
+)
 
 
 class UnsupportedClaim(ValueError):
@@ -14,15 +19,15 @@ def validate_evidence_citations(
     investigation: Investigation, evidence_ids: Collection[str]
 ) -> None:
     available = tuple(evidence_ids)
-    if any(not isinstance(item, str) or not item.strip() for item in available) or len(
-        available
-    ) != len(set(available)):
+    if any(not is_safe_structural_id(item) for item in available) or len(available) != len(
+        set(available)
+    ):
         raise UnsupportedClaim("evidence collection is invalid")
     allowed = set(available)
     for statement in investigation.facts + investigation.directions:
         _validate_statement(statement, allowed)
     classification_ids = investigation.classification_evidence_ids
-    if any(not isinstance(item, str) or not item.strip() for item in classification_ids) or len(
+    if any(not is_safe_structural_id(item) for item in classification_ids) or len(
         classification_ids
     ) != len(set(classification_ids)):
         raise UnsupportedClaim("classification citations are invalid")
@@ -52,7 +57,7 @@ def _validate_statement(statement: SupportedStatement, allowed: set[str]) -> Non
     citations = statement.evidence_ids
     if (
         not citations
-        or any(not isinstance(item, str) or not item.strip() for item in citations)
+        or any(not is_safe_structural_id(item) for item in citations)
         or len(citations) != len(set(citations))
         or not set(citations) <= allowed
     ):
@@ -71,17 +76,25 @@ def _render_statements(statements: tuple[SupportedStatement, ...]) -> str:
     if not statements:
         return "- 없음"
     return "\n".join(
-        f"- {statement.text} (근거: {', '.join(statement.evidence_ids)})"
+        f"- {_safe_inline(statement.text)} (근거: {', '.join(statement.evidence_ids)})"
         for statement in statements
     )
 
 
 def _render_missing(missing: tuple[str, ...]) -> str:
-    return "\n".join(f"- {item}" for item in missing) if missing else "- 없음"
+    return "\n".join(f"- {_safe_inline(item)}" for item in missing) if missing else "- 없음"
 
 
 def _render_classification(investigation: Investigation) -> str:
     if not investigation.classification_evidence_ids:
-        return f"- {investigation.classification}"
+        return f"- {_safe_inline(investigation.classification)}"
     citations = ", ".join(investigation.classification_evidence_ids)
-    return f"- {investigation.classification} (근거: {citations})"
+    return f"- {_safe_inline(investigation.classification)} (근거: {citations})"
+
+
+def _safe_inline(value: str) -> str:
+    normalized = " ".join(value.split())
+    escaped = html.escape(normalized, quote=False)
+    for control in "\\`*_{}[]()#+!|>~":
+        escaped = escaped.replace(control, f"\\{control}")
+    return escaped

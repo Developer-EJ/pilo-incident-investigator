@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -7,6 +9,7 @@ from pilo_incident_investigator.brief import (
     render_issue_markdown,
     validate_evidence_citations,
 )
+from pilo_incident_investigator.bundle import canonical_bundle_json
 from pilo_incident_investigator.domain import (
     AlarmEvent,
     Evidence,
@@ -14,6 +17,8 @@ from pilo_incident_investigator.domain import (
     Investigation,
     Snapshot,
     SupportedStatement,
+    ToolRequest,
+    ToolResult,
 )
 from pilo_incident_investigator.redaction import UnsafeBundleError
 
@@ -102,7 +107,7 @@ def test_render_issue_markdown_has_four_sections_and_adjacent_evidence() -> None
     ]
     assert "서비스 실행 수가 감소했습니다. (근거: E-001)" in markdown
     assert "중지 원인을 확인합니다. (근거: E-002)" in markdown
-    assert "resource_pressure (근거: E-001)" in markdown
+    assert "resource\\_pressure (근거: E-001)" in markdown
 
 
 def test_render_issue_markdown_redacts_before_returning_text() -> None:
@@ -129,3 +134,98 @@ def test_render_issue_markdown_fails_closed_for_invalid_citations() -> None:
         render_issue_markdown(_bundle(_investigation(fact_ids=("E-999",))))
 
     assert "E-999" not in str(caught.value)
+
+
+def _bundle_with_unsafe_structural_id(location: str) -> IncidentBundle:
+    unsafe_id = "E-xoxb-1234567890-secret"
+    bundle = _bundle()
+    if location == "snapshot":
+        unsafe_evidence = replace(bundle.snapshot.evidence[0], evidence_id=unsafe_id)
+        investigation = Investigation(
+            facts=(SupportedStatement("unsafe evidence", (unsafe_id,)),),
+            directions=(SupportedStatement("safe direction", ("E-002",)),),
+            missing=(),
+            classification="unsafe evidence classification",
+            tool_calls=(),
+            classification_evidence_ids=(unsafe_id,),
+        )
+        return replace(
+            bundle,
+            snapshot=replace(
+                bundle.snapshot,
+                evidence=(unsafe_evidence, bundle.snapshot.evidence[1]),
+            ),
+            investigation=investigation,
+        )
+    tool_evidence = Evidence(unsafe_id, "rds", NOW, "event", {})
+    result = ToolResult(
+        ToolRequest("rds_events", "rds-01", {}, "E-001 supports lookup"),
+        (tool_evidence,),
+        None,
+    )
+    if location == "tool":
+        return replace(bundle, investigation=replace(bundle.investigation, tool_calls=(result,)))
+    if location == "statement":
+        fact = SupportedStatement("unsafe citation", (unsafe_id,))
+        return replace(
+            bundle,
+            investigation=replace(bundle.investigation, facts=(fact,), tool_calls=(result,)),
+        )
+    return replace(
+        bundle,
+        investigation=replace(
+            bundle.investigation,
+            classification_evidence_ids=(unsafe_id,),
+            tool_calls=(result,),
+        ),
+    )
+
+
+@pytest.mark.parametrize("location", ["snapshot", "tool", "statement", "classification"])
+@pytest.mark.parametrize("output", [render_issue_markdown, canonical_bundle_json])
+def test_outputs_fail_closed_for_credential_shaped_structural_ids(
+    location: str, output: Callable[[IncidentBundle], str | bytes]
+) -> None:
+    with pytest.raises(UnsafeBundleError) as caught:
+        output(_bundle_with_unsafe_structural_id(location))
+
+    assert "xoxb" not in str(caught.value)
+
+
+def test_validate_evidence_citations_rejects_markdown_or_control_ids() -> None:
+    for unsafe_id in ("E-001\n## injected", "E-[link](target)", "E-001\tmore"):
+        investigation = _investigation(
+            fact_ids=(unsafe_id,), classification="unclassified", classification_ids=()
+        )
+        with pytest.raises(UnsupportedClaim) as caught:
+            validate_evidence_citations(investigation, (unsafe_id, "E-002"))
+        assert unsafe_id not in str(caught.value)
+
+
+def test_render_issue_markdown_neutralizes_multiline_markdown_and_html() -> None:
+    investigation = Investigation(
+        facts=(
+            SupportedStatement(
+                "상태 확인\n## 주입 제목\n- 주입 항목 <script>alert(1)</script> [링크](evil)",
+                ("E-001",),
+            ),
+        ),
+        directions=(SupportedStatement("확인\r\n## 다섯번째\t- 항목", ("E-002",)),),
+        missing=("누락\n## 여섯번째\n* 항목",),
+        classification="분류\n## 일곱번째 <b>html</b>",
+        tool_calls=(),
+        classification_evidence_ids=("E-001",),
+    )
+
+    markdown = render_issue_markdown(_bundle(investigation))
+
+    assert [line for line in markdown.splitlines() if line.startswith("## ")] == [
+        "## 확인된 사실",
+        "## 조사 방향",
+        "## 누락 정보",
+        "## 분류 상태",
+    ]
+    assert "<script>" not in markdown
+    assert "<b>" not in markdown
+    assert "[링크](evil)" not in markdown
+    assert "\t" not in markdown

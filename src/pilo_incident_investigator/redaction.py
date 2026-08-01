@@ -36,13 +36,17 @@ _RULES: tuple[_Rule, ...] = (
         "[REDACTED:GITHUB_TOKEN]",
         "GITHUB_TOKEN",
     ),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED:AWS_ACCESS_KEY]", "AWS_ACCESS_KEY"),
+    (
+        re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+        "[REDACTED:AWS_ACCESS_KEY]",
+        "AWS_ACCESS_KEY",
+    ),
     (
         re.compile(
-            r"(?i)\bauthorization\s*[:=]?\s*(?:bearer|basic)\s+"
+            r"(?i)\b(?:authorization\s*[:=]?\s*)?(?:bearer|basic)\s+"
             r"(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+"
         ),
-        "Authorization: [REDACTED:AUTHORIZATION]",
+        "[REDACTED:AUTHORIZATION]",
         "AUTHORIZATION",
     ),
     (
@@ -52,7 +56,9 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         re.compile(
-            r"(?i)([?&](?:access_token|api_key|apikey|token|secret|password)=)"
+            r"(?i)([?&](?:access[_-]?token|client[_-]?secret|refresh[_-]?token|"
+            r"id[_-]?token|auth[_-]?token|x[_-]?api[_-]?key|api[_-]?key|token|"
+            r"secret|password)=)"
             r"(?!\[REDACTED:QUERY_CREDENTIAL\])[^&#\s,;]+"
         ),
         r"\1[REDACTED:QUERY_CREDENTIAL]",
@@ -60,16 +66,38 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         re.compile(
-            r"(?i)\b(password|passwd|secret|token)\s*[=:]\s*"
-            r"(?!\[REDACTED:)[^\s,;]+"
+            r"(?i)\b(password|passwd|secret|token|client[_-]?secret|"
+            r"aws[_-]?secret[_-]?access[_-]?key|x[_-]?api[_-]?key|api[_-]?key|"
+            r"refresh[_-]?token|id[_-]?token|auth[_-]?token|webhook[_-]?url|"
+            r"private[_-]?key|credentials?)\s*[=:]\s*(?!\[REDACTED:)"
+            r"""(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
         ),
         r"\1=[REDACTED:CREDENTIAL]",
         "CREDENTIAL_ASSIGNMENT",
     ),
 )
 _SENSITIVE_KEYS = frozenset(
-    {"authorization", "password", "passwd", "secret", "token", "access_token", "api_key"}
+    {
+        "clientsecret",
+        "accesstoken",
+        "awssecretaccesskey",
+        "xapikey",
+        "apikey",
+        "refreshtoken",
+        "idtoken",
+        "authtoken",
+        "authorization",
+        "webhookurl",
+        "privatekey",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+    }
 )
+_REDACTED_SENTINEL = re.compile(r"\[REDACTED:[A-Z_]+\]")
 
 
 class Redactor:
@@ -81,6 +109,7 @@ class Redactor:
     def redact_bundle(self, bundle: IncidentBundle) -> tuple[IncidentBundle, RedactionReport]:
         counts: Counter[str] = Counter()
         try:
+            _validate_bundle_structural_ids(bundle)
             redacted = IncidentBundle(
                 incident_id=self._redact_text(bundle.incident_id, counts),
                 alarm=self._redact_alarm(bundle.alarm, counts),
@@ -176,26 +205,32 @@ class Redactor:
             safe_key = self._redact_text(key, counts)
             if safe_key in redacted:
                 raise ValueError
-            if key.casefold() in _SENSITIVE_KEYS and isinstance(item, str):
-                safe_item: JsonValue = self._redact_sensitive_field(item, counts)
-            else:
-                safe_item = self._redact_json(item, counts)
+            sensitive = _normalize_key(key) in _SENSITIVE_KEYS
+            safe_item = self._redact_json(item, counts, sensitive=sensitive)
             redacted[safe_key] = safe_item
         return redacted
 
-    def _redact_json(self, value: JsonValue, counts: Counter[str]) -> JsonValue:
+    def _redact_json(
+        self, value: JsonValue, counts: Counter[str], *, sensitive: bool = False
+    ) -> JsonValue:
         if value is None or isinstance(value, bool | int | float):
             return value
         if isinstance(value, str):
-            return self._redact_text(value, counts)
+            return (
+                self._redact_sensitive_field(value, counts)
+                if sensitive
+                else self._redact_text(value, counts)
+            )
         if isinstance(value, list):
-            return [self._redact_json(item, counts) for item in value]
+            return [self._redact_json(item, counts, sensitive=sensitive) for item in value]
         if isinstance(value, dict):
+            if sensitive:
+                return self._redact_sensitive_mapping(value, counts)
             return self._redact_mapping(value, counts)
         raise TypeError
 
     def _redact_sensitive_field(self, value: str, counts: Counter[str]) -> str:
-        if value.startswith("[REDACTED:") and value.endswith("]"):
+        if _REDACTED_SENTINEL.fullmatch(value):
             return value
         counts["SENSITIVE_FIELD"] += 1
         return "[REDACTED:SENSITIVE_FIELD]"
@@ -207,9 +242,52 @@ class Redactor:
             counts[category] += replacements
         return redacted
 
+    def _redact_sensitive_mapping(
+        self, value: dict[str, JsonValue], counts: Counter[str]
+    ) -> dict[str, JsonValue]:
+        redacted: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError
+            safe_key = self._redact_text(key, counts)
+            if safe_key in redacted:
+                raise ValueError
+            redacted[safe_key] = self._redact_json(item, counts, sensitive=True)
+        return redacted
+
 
 def _report(counts: Counter[str]) -> RedactionReport:
     categories = tuple(sorted((name, count) for name, count in counts.items() if count))
     return RedactionReport(
         replacements=sum(count for _, count in categories), categories=categories
     )
+
+
+def is_safe_structural_id(value: object) -> bool:
+    if not isinstance(value, str) or not value or not any(char.isalnum() for char in value):
+        return False
+    if not value[0].isalnum() or not value[-1].isalnum():
+        return False
+    if any(not (char.isalnum() or char in "-_.:") for char in value):
+        return False
+    redacted, report = Redactor().redact_text(value)
+    return report.replacements == 0 and redacted == value
+
+
+def _validate_bundle_structural_ids(bundle: IncidentBundle) -> None:
+    ids: list[object] = [item.evidence_id for item in bundle.snapshot.evidence]
+    ids.extend(
+        item.evidence_id for result in bundle.investigation.tool_calls for item in result.evidence
+    )
+    ids.extend(
+        evidence_id
+        for statement in bundle.investigation.facts + bundle.investigation.directions
+        for evidence_id in statement.evidence_ids
+    )
+    ids.extend(bundle.investigation.classification_evidence_ids)
+    if any(not is_safe_structural_id(value) for value in ids):
+        raise ValueError
+
+
+def _normalize_key(value: str) -> str:
+    return "".join(char for char in value.casefold() if char.isascii() and char.isalnum())
