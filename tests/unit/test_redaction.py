@@ -9,6 +9,7 @@ from pilo_incident_investigator.domain import (
     Evidence,
     IncidentBundle,
     Investigation,
+    JsonValue,
     Snapshot,
     SupportedStatement,
     ToolRequest,
@@ -229,7 +230,7 @@ def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> N
     bundle = _safe_bundle()
     bundle.metadata["clientSecret"] = {
         "first": "opaque-one",
-        "nested": ["opaque-two", 3, False, None, {"last": "[REDACTED:SENSITIVE_FIELD]"}],
+        "nested": ["opaque-two", {"last": "[REDACTED:SENSITIVE_FIELD]"}],
     }
 
     redacted, report = Redactor().redact_bundle(bundle)
@@ -239,9 +240,6 @@ def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> N
         "first": "[REDACTED:SENSITIVE_FIELD]",
         "nested": [
             "[REDACTED:SENSITIVE_FIELD]",
-            3,
-            False,
-            None,
             {"last": "[REDACTED:SENSITIVE_FIELD]"},
         ],
     }
@@ -453,3 +451,225 @@ def test_redact_bundle_fails_closed_without_echoing_invalid_value() -> None:
 
     assert "object" not in str(caught.value)
     assert "opaque-metadata-value" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"token": "synthetic-opaque-value"},
+        {"nested": {"password": "synthetic-opaque-value"}},
+        {"items": [{"clientSecret": ["synthetic-opaque-value"]}]},
+        {"awsSecretAccessKey": {"part": "synthetic-opaque-value"}},
+    ],
+)
+def test_redact_json_uses_sensitive_key_context_for_opaque_values(value: object) -> None:
+    redacted, report = Redactor().redact_json(value)  # type: ignore[arg-type]
+
+    assert redacted != value
+    assert report.replacements > 0
+    assert "synthetic-opaque-value" not in repr(redacted)
+
+
+def test_redact_json_preserves_redacted_sentinels_and_rotation_metadata() -> None:
+    value: JsonValue = {
+        "password": "[REDACTED:SENSITIVE_FIELD]",
+        "rotation_enabled": True,
+        "last_rotated_at": "2026-01-01T00:00:00Z",
+        "next_rotation_at": None,
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"token": 123456789},
+        {"password": True},
+        {"password": None},
+        {"clientSecret": [{"part": 7}]},
+        {"clientSecret": []},
+        {"clientSecret": {}},
+    ],
+)
+def test_redact_json_fails_closed_for_non_string_or_empty_sensitive_values(
+    value: JsonValue,
+) -> None:
+    with pytest.raises(UnsafeBundleError) as captured:
+        Redactor().redact_json(value)
+
+    rendered = repr(captured.value)
+    assert "123456789" not in rendered
+    assert "clientSecret" not in rendered
+
+
+def test_redact_json_accepts_only_approved_sentinels_in_sensitive_containers() -> None:
+    value: JsonValue = {
+        "clientSecret": [
+            "[REDACTED:SENSITIVE_FIELD]",
+            {"nested": "[REDACTED:SENSITIVE_FIELD]"},
+        ]
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+def test_redact_json_preserves_non_sensitive_primitives_and_empty_containers() -> None:
+    value: JsonValue = {
+        "count": 3,
+        "enabled": True,
+        "ratio": 1.25,
+        "missing": None,
+        "items": [],
+        "details": {},
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+    assert isinstance(redacted, dict)
+    assert type(redacted["count"]) is int
+    assert type(redacted["enabled"]) is bool
+    assert type(redacted["ratio"]) is float
+
+
+def test_redact_json_preserves_secret_rotation_metadata_primitives() -> None:
+    value: JsonValue = {
+        "rotation_enabled": True,
+        "rotation_interval_days": 30,
+        "rotation_progress": 0.5,
+        "last_rotated_at": "2026-01-01T00:00:00Z",
+        "next_rotation_at": None,
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"password":"opaque-secret"}',
+        r"{\"password\":\"opaque-secret\"}",
+    ],
+)
+def test_redact_json_detects_embedded_json_credentials_in_log_strings(message: str) -> None:
+    value: JsonValue = {"message": message}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements > 0
+    assert "opaque-secret" not in repr(redacted)
+
+
+def test_redact_json_preserves_safe_structured_log_strings() -> None:
+    value: JsonValue = {
+        "message": '{"status":"healthy","rotation_enabled":true}',
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize("wrapper", ["secrets", "tokens", "passwords", "clientSecrets"])
+def test_plural_sensitive_wrappers_create_sensitive_context(wrapper: str) -> None:
+    value: JsonValue = {wrapper: {"database": "opaque-secret"}}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    ["[REDACTED:UNAPPROVED]", "[REDACTED:FAKE]"],
+)
+def test_unapproved_redaction_sentinel_is_not_idempotently_trusted(sentinel: str) -> None:
+    value: JsonValue = {"clientSecret": {"nested": sentinel}}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == {"clientSecret": {"nested": "[REDACTED:SENSITIVE_FIELD]"}}
+    assert report.replacements == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"password":123456}',
+        '{"password":true}',
+        '{"password":null}',
+        '{"password":{"part":7}}',
+        '{"password":["opaque-secret",7]}',
+        r'{"password":123456}',
+        '{"outer":"{\\"password\\":123456}"}',
+    ],
+)
+def test_embedded_json_non_string_sensitive_values_fail_closed(message: str) -> None:
+    value: JsonValue = {"message": message}
+
+    with pytest.raises(UnsafeBundleError) as captured:
+        Redactor().redact_json(value)
+
+    assert "123456" not in repr(captured.value)
+    assert "opaque-secret" not in repr(captured.value)
+
+
+def test_embedded_json_spaced_sensitive_key_is_redacted() -> None:
+    value: JsonValue = {"message": '{"client secret":"opaque-secret"}'}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)
+
+
+def test_non_json_prose_with_braced_example_is_not_parsed_or_redacted() -> None:
+    value: JsonValue = {"message": 'prefix {"password":123456} suffix'}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize("wrapper", ["secret_rotation_metadata", "secrets_rotation_metadata"])
+def test_secret_rotation_metadata_wrapper_is_narrowly_safe(wrapper: str) -> None:
+    value: JsonValue = {
+        wrapper: {
+            "last_rotated_at": "2026-01-01T00:00:00Z",
+            "rotation_enabled": True,
+        }
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+def test_secret_rotation_metadata_wrapper_does_not_exempt_nested_credentials() -> None:
+    value: JsonValue = {
+        "secret_rotation_metadata": {"password": "opaque-secret"},
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)

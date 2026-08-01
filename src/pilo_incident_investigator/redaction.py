@@ -2,9 +2,11 @@
 
 import base64
 import binascii
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
+from typing import cast
 
 from pilo_incident_investigator.domain import (
     AlarmEvent,
@@ -83,6 +85,18 @@ _SENSITIVE_EXACT_KEYS = frozenset(
     }
 )
 _REDACTED_SENTINEL = re.compile(r"\[REDACTED:[A-Z_]+\]")
+_APPROVED_REDACTION_SENTINELS = frozenset(
+    {
+        "[REDACTED:AUTHORIZATION]",
+        "[REDACTED:AWS_ACCESS_KEY]",
+        "[REDACTED:CREDENTIAL]",
+        "[REDACTED:GITHUB_TOKEN]",
+        "[REDACTED:QUERY_CREDENTIAL]",
+        "[REDACTED:SENSITIVE_FIELD]",
+        "[REDACTED:SLACK_TOKEN]",
+        "[REDACTED:WEBHOOK_URL]",
+    }
+)
 _STANDALONE_AUTHORIZATION = re.compile(
     r"(?i)\b(?P<scheme>bearer|basic)\s+"
     r"(?P<credential>(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+)"
@@ -101,7 +115,20 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""[^"'\s,;]+))"""
 )
 _SENSITIVE_SINGLE_TOKENS = frozenset(
-    {"password", "passwd", "secret", "token", "authorization", "credential", "credentials"}
+    {
+        "authorization",
+        "authorizations",
+        "credential",
+        "credentials",
+        "password",
+        "passwords",
+        "passwd",
+        "passwds",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+    }
 )
 _SENSITIVE_TOKEN_PAIRS = frozenset(
     {
@@ -113,6 +140,20 @@ _SENSITIVE_TOKEN_PAIRS = frozenset(
         ("access", "key"),
         ("private", "key"),
         ("webhook", "url"),
+        ("client", "secrets"),
+        ("refresh", "tokens"),
+        ("id", "tokens"),
+        ("auth", "tokens"),
+        ("api", "keys"),
+        ("access", "keys"),
+        ("private", "keys"),
+        ("webhook", "urls"),
+    }
+)
+_NON_SENSITIVE_WRAPPER_TOKENS = frozenset(
+    {
+        ("secret", "rotation", "metadata"),
+        ("secrets", "rotation", "metadata"),
     }
 )
 
@@ -121,6 +162,15 @@ class Redactor:
     def redact_text(self, value: str) -> tuple[str, RedactionReport]:
         counts: Counter[str] = Counter()
         redacted = self._redact_text(value, counts)
+        return redacted, _report(counts)
+
+    def redact_json(self, value: JsonValue) -> tuple[JsonValue, RedactionReport]:
+        """Redact a JSON tree using the same sensitive-key context as Bundles."""
+        counts: Counter[str] = Counter()
+        try:
+            redacted = self._redact_json(value, counts)
+        except Exception:
+            raise UnsafeBundleError("JSON redaction failed") from None
         return redacted, _report(counts)
 
     def redact_bundle(self, bundle: IncidentBundle) -> tuple[IncidentBundle, RedactionReport]:
@@ -230,30 +280,37 @@ class Redactor:
     def _redact_json(
         self, value: JsonValue, counts: Counter[str], *, sensitive: bool = False
     ) -> JsonValue:
+        if sensitive:
+            if isinstance(value, str):
+                return self._redact_sensitive_field(value, counts)
+            if isinstance(value, list):
+                if not value:
+                    raise ValueError
+                return [self._redact_json(item, counts, sensitive=True) for item in value]
+            if isinstance(value, dict):
+                if not value:
+                    raise ValueError
+                return self._redact_sensitive_mapping(value, counts)
+            raise TypeError
         if value is None or isinstance(value, bool | int | float):
             return value
         if isinstance(value, str):
-            return (
-                self._redact_sensitive_field(value, counts)
-                if sensitive
-                else self._redact_text(value, counts)
-            )
+            return self._redact_text(value, counts)
         if isinstance(value, list):
-            return [self._redact_json(item, counts, sensitive=sensitive) for item in value]
+            return [self._redact_json(item, counts) for item in value]
         if isinstance(value, dict):
-            if sensitive:
-                return self._redact_sensitive_mapping(value, counts)
             return self._redact_mapping(value, counts)
         raise TypeError
 
     def _redact_sensitive_field(self, value: str, counts: Counter[str]) -> str:
-        if _REDACTED_SENTINEL.fullmatch(value):
+        if value in _APPROVED_REDACTION_SENTINELS:
             return value
         counts["SENSITIVE_FIELD"] += 1
         return "[REDACTED:SENSITIVE_FIELD]"
 
     def _redact_text(self, value: str, counts: Counter[str]) -> str:
-        redacted = value
+        redacted = self._redact_embedded_json(value, counts)
+        redacted = self._redact_unapproved_sentinels(redacted, counts)
         for pattern, replacement, category in _RULES:
             redacted, replacements = pattern.subn(replacement, redacted)
             counts[category] += replacements
@@ -261,6 +318,43 @@ class Redactor:
         redacted = self._redact_standalone_authorization(redacted, counts)
         redacted = self._redact_assignments(redacted, counts)
         return redacted
+
+    def _redact_unapproved_sentinels(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if match.group(0) in _APPROVED_REDACTION_SENTINELS:
+                return match.group(0)
+            counts["SENSITIVE_FIELD"] += 1
+            return "[REDACTED:SENSITIVE_FIELD]"
+
+        return _REDACTED_SENTINEL.sub(replace, value)
+
+    def _redact_embedded_json(self, value: str, counts: Counter[str]) -> str:
+        stripped = value.strip()
+        if not (
+            (stripped.startswith("{") and stripped.endswith("}"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
+        ):
+            return value
+        candidates = ((stripped, False), (stripped.replace(r"\"", '"'), True))
+        for candidate, was_escaped in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (json.JSONDecodeError, UnicodeError):
+                continue
+            if not isinstance(parsed, dict | list):
+                return value
+            safe_parsed = cast(JsonValue, parsed)
+            redacted = self._redact_json(safe_parsed, counts)
+            if redacted == safe_parsed:
+                return value
+            serialized = json.dumps(
+                redacted,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            return serialized.replace('"', r"\"") if was_escaped else serialized
+        return value
 
     def _redact_standalone_authorization(self, value: str, counts: Counter[str]) -> str:
         def replace(match: re.Match[str]) -> str:
@@ -346,6 +440,8 @@ def _key_tokens(value: str) -> tuple[str, ...]:
 
 def _is_sensitive_key(value: str) -> bool:
     tokens = _key_tokens(value)
+    if tokens in _NON_SENSITIVE_WRAPPER_TOKENS:
+        return False
     collapsed = "".join(tokens)
     if collapsed in _SENSITIVE_EXACT_KEYS or any(
         token in _SENSITIVE_SINGLE_TOKENS for token in tokens
