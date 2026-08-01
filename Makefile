@@ -12,6 +12,7 @@ test:
 
 eval:
 	$(PYTHON) -m pytest tests/eval -q
+	$(PYTHON) scripts/run_eval.py
 
 package:
 	$(PYTHON) scripts/build_lambda.py
@@ -23,4 +24,4 @@ terraform-check: package
 	terraform -chdir=infra test
 	$(PYTHON) scripts/check_iam_policy.py infra
 
-verify: check test terraform-check
+verify: check test eval terraform-check
