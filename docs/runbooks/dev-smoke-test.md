@@ -292,7 +292,8 @@ function Wait-ForPublishedIncident {
       $incidentId = $bundleKeyMatch.Groups[1].Value
       $bundleHead = Get-AwsJson @("s3api", "head-object", "--bucket", $bundleBucket, "--key", $bundleKey, "--region", "ap-northeast-2", "--output", "json") "Incident Bundle metadata check failed"
       if ($bundleHead.ServerSideEncryption -ne "AES256" -or [int64]$bundleHead.ContentLength -lt 1) { throw "Incident Bundle metadata is invalid" }
-      $dynamoValues = @{ ":incident_id" = @{ "S" = $incidentId } } | ConvertTo-Json -Compress
+      # Windows PowerShell의 native JSON 따옴표 손실을 피하도록 AWS CLI shorthand를 사용한다.
+      $dynamoValues = ":incident_id={S=$incidentId}"
       $stateResult = Get-AwsJson @("dynamodb", "scan", "--table-name", $stateTable, "--filter-expression", "incident_id = :incident_id", "--projection-expression", "incident_id, checkpoint, checkpoint_rank, bundle_stored, issue_published, slack_status, processing_status", "--expression-attribute-values", $dynamoValues, "--region", "ap-northeast-2", "--output", "json") "DynamoDB incident state check failed"
       $stateItems = @($stateResult.Items | Where-Object { $null -ne $_ })
       if ($stateItems.Count -gt 1) { throw "More than one DynamoDB state item was found" }
