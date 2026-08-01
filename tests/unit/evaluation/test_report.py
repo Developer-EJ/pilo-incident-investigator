@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -208,6 +209,53 @@ def test_failed_write_does_not_remove_a_preexisting_temp(
     assert not tuple(tmp_path.glob("eval-*.json"))
     assert not tuple(tmp_path.glob("eval-*.md"))
     assert not tuple(tmp_path.glob("*.lock"))
+
+
+def test_generated_report_residue_is_ignored_without_hiding_reviewed_baselines() -> None:
+    reports_dir = ROOT / "reports"
+    generated_paths = (
+        reports_dir / ".eval-20990101T000000Z.lock",
+        reports_dir / ".eval-20990101T000000Z.json.tmp",
+        reports_dir / ".eval-20990101T000000Z.md.tmp",
+        reports_dir / "eval-20990101T000000Z.json",
+        reports_dir / "eval-20990101T000000Z.md",
+    )
+    try:
+        for path in generated_paths:
+            path.write_text("synthetic residue", encoding="utf-8")
+        for path in generated_paths:
+            relative = path.relative_to(ROOT).as_posix()
+            ignored = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--", relative],
+                cwd=ROOT,
+                check=False,
+            )
+            assert ignored.returncode == 0, relative
+    finally:
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+
+    tracked_keep = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", "reports/.gitkeep"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    baseline = subprocess.run(
+        [
+            "git",
+            "check-ignore",
+            "--quiet",
+            "--",
+            "fixtures/eval/baselines/reviewed.json",
+        ],
+        cwd=ROOT,
+        check=False,
+    )
+    assert tracked_keep.returncode == 0
+    assert tracked_keep.stdout.strip() == "reports/.gitkeep"
+    assert baseline.returncode == 1
 
 
 @pytest.mark.parametrize(

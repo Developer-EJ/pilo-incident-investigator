@@ -23,3 +23,6 @@ dist/
 pilo-topology.yaml
 reports/eval-*.json
 reports/eval-*.md
+reports/.eval-*.lock
+reports/.eval-*.json.tmp
+reports/.eval-*.md.tmp
