@@ -1,0 +1,62 @@
+fixture_id: "deployment-regression-noisy"
+scenario: "deployment_regression"
+variant: "noisy"
+alarm: {"event_id":"evt-011","alarm_arn":"arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-incident-alarm","alarm_name":"synthetic-incident-alarm","state_timestamp":"2026-01-01T00:10:00Z","detail":{"alarmName":"synthetic-incident-alarm","state":{"value":"ALARM","reason":"synthetic threshold breached: 24 >= 10","timestamp":"2026-01-01T00:10:00Z"},"previousState":{"value":"OK","reason":"synthetic metric within threshold","timestamp":"2026-01-01T00:09:00Z"},"configuration":{"metrics":[{"id":"m1","metricStat":{"metric":{"namespace":"PILO/Synthetic","name":"HTTP5xx","dimensions":{"ClusterName":"pilo-dev-cluster","ServiceName":"pilo-dev-service-01"}},"period":60,"stat":"Average"},"returnData":true}]}}}
+topology:
+  version: 1
+  environment: dev
+  region: ap-northeast-2
+  services:
+    - {"key":"pilo-dev-service-01","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-01","log_groups":["/aws/ecs/pilo-dev-service-01"],"target_groups":["pilo-dev-target-01"],"rds_instances":["pilo-dev-db-01"],"secrets":["pilo-dev-secret-01"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01"],"github_repository":"synthetic-org/pilo-dev-service-01"}
+    - {"key":"pilo-dev-service-02","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-02","log_groups":["/aws/ecs/pilo-dev-service-02"],"target_groups":["pilo-dev-target-02"],"rds_instances":["pilo-dev-db-02"],"secrets":["pilo-dev-secret-02"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-02"],"github_repository":"synthetic-org/pilo-dev-service-02"}
+    - {"key":"pilo-dev-service-03","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-03","log_groups":["/aws/ecs/pilo-dev-service-03"],"target_groups":["pilo-dev-target-03"],"rds_instances":["pilo-dev-db-03"],"secrets":["pilo-dev-secret-03"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-03"],"github_repository":"synthetic-org/pilo-dev-service-03"}
+    - {"key":"pilo-dev-service-04","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-04","log_groups":["/aws/ecs/pilo-dev-service-04"],"target_groups":["pilo-dev-target-04"],"rds_instances":["pilo-dev-db-04"],"secrets":["pilo-dev-secret-04"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-04"],"github_repository":"synthetic-org/pilo-dev-service-04"}
+    - {"key":"pilo-dev-service-05","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-05","log_groups":["/aws/ecs/pilo-dev-service-05"],"target_groups":["pilo-dev-target-05"],"rds_instances":["pilo-dev-db-05"],"secrets":["pilo-dev-secret-05"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-05"],"github_repository":"synthetic-org/pilo-dev-service-05"}
+    - {"key":"pilo-dev-service-06","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-06","log_groups":["/aws/ecs/pilo-dev-service-06"],"target_groups":["pilo-dev-target-06"],"rds_instances":["pilo-dev-db-06"],"secrets":["pilo-dev-secret-06"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-06"],"github_repository":"synthetic-org/pilo-dev-service-06"}
+    - {"key":"pilo-dev-service-07","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-07","log_groups":["/aws/ecs/pilo-dev-service-07"],"target_groups":["pilo-dev-target-07"],"rds_instances":["pilo-dev-db-07"],"secrets":["pilo-dev-secret-07"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-07"],"github_repository":"synthetic-org/pilo-dev-service-07"}
+    - {"key":"pilo-dev-service-08","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-08","log_groups":["/aws/ecs/pilo-dev-service-08"],"target_groups":["pilo-dev-target-08"],"rds_instances":["pilo-dev-db-08"],"secrets":["pilo-dev-secret-08"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-08"],"github_repository":"synthetic-org/pilo-dev-service-08"}
+  alarms:
+    "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-incident-alarm": ["pilo-dev-service-01"]
+snapshot:
+  incident_id: "inc-c03ea60fb7d629426526"
+  evidence:
+    - {"evidence_id":"E-001","source":"ecs.describe_services","observed_at":"2026-01-01T00:10:00Z","summary":"target ECS state","data":{"service":"pilo-dev-service-01","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-002","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-01","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-003","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-02","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-004","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-03","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-005","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-04","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-006","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-05","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-007","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-06","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-008","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-07","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-009","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-08","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-010","source":"elbv2.describe_target_health","observed_at":"2026-01-01T00:10:00Z","summary":"ALB target health","data":{"service":"pilo-dev-service-01","target_group":"pilo-dev-target-01","states":["healthy"]}}
+    - {"evidence_id":"E-011","source":"github.deployments","observed_at":"2026-01-01T00:10:00Z","summary":"recent GitHub deployment","data":{"repository":"synthetic-org/pilo-dev-service-01","deployment_id":"1001","environment":"dev","revision":"1111111111111111111111111111111111111111","created_at":"2026-01-01T00:04:00+00:00"}}
+    - {"evidence_id":"E-012","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic application errors began at 2026-01-01T00:06:00Z"}}
+    - {"evidence_id":"E-013","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic background cache refresh completed"}}
+    - {"evidence_id":"E-014","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic metrics flush completed"}}
+    - {"evidence_id":"E-015","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic scheduler heartbeat recorded"}}
+    - {"evidence_id":"E-016","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic secondary request completed"}}
+    - {"evidence_id":"E-017","source":"rds.describe_db_instances","observed_at":"2026-01-01T00:10:00Z","summary":"RDS basic status","data":{"database":"pilo-dev-db-01","status":"available"}}
+  failures: []
+tool_results:
+  github-changed-files:
+    request: {"tool":"github_changed_files","resource_key":"synthetic-org/pilo-dev-service-01","parameters":{},"reason":"E-001 supports this bounded read-only lookup."}
+    evidence:
+      - {"evidence_id":"tool-local-github-changed-files-cd5e3383c8fa9d01-1","source":"github_changed_files","observed_at":"2026-01-01T00:10:00Z","summary":"GitHub changed file","data":{"repository":"synthetic-org/pilo-dev-service-01","path":"application.py","status":"modified"}}
+    failure: null
+  service-log-search:
+    request: {"tool":"service_log_search","resource_key":"/aws/ecs/pilo-dev-service-01","parameters":{},"reason":"E-001 supports this bounded read-only lookup."}
+    evidence:
+      - {"evidence_id":"tool-local-service-log-search-ba1bcdf6a405dd96-1","source":"service_log_search","observed_at":"2026-01-01T00:10:00Z","summary":"service log event","data":{"log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic application errors began at 2026-01-01T00:06:00Z","log_stream":"synthetic/service-01/error"}}
+    failure: null
+expected:
+  required_evidence_ids: ["E-011","E-012","tool-local-github-changed-files-cd5e3383c8fa9d01-1"]
+  acceptable_direction_labels: ["inspect_recent_deployment_diff"]
+  useful_tools: ["github_changed_files","service_log_search"]
+  classification: "deployment_regression"
+  facts:
+    - {"text":"synthetic error onset follows the recent deployment","evidence_ids":["E-011","E-012","tool-local-github-changed-files-cd5e3383c8fa9d01-1"]}
+  missing_information: []
+handoff:
+  acceptable_first_direction_labels: ["inspect_recent_deployment_diff"]
+  allowed_clarification_kinds: []
