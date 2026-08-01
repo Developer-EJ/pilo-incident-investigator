@@ -8,8 +8,8 @@ CloudWatch를 대체하거나 모든 장애의 원인을 진단하는 범용 플
 
 ## 현재 단계
 
-- 현재는 **Planning phase**다. 설계는 2026-08-01에 사용자 승인을 받았다.
-- 사용자 구현 계획 승인 전에는 애플리케이션 코드, Terraform 리소스, CI workflow, dependency scaffold를 추가하지 않는다.
+- 현재는 **Implementation phase**다. 설계와 구현 계획은 2026-08-01에 사용자 승인을 받았다.
+- 구현은 `docs/superpowers/plans/`의 승인된 계획을 기능별 브랜치와 `dev` 대상 PR로 나누어 진행한다. 전체 구현·검증 전에는 `main` 대상 PR을 만들지 않는다.
 - 설계의 기준 문서는 `docs/design.md`다.
 
 ## 보안 및 안전 금지사항
