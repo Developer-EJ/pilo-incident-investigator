@@ -14,6 +14,7 @@ from pilo_incident_investigator.event import (
 )
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "events" / "alarm.json"
+DEV_SMOKE_FIXTURE = Path(__file__).parents[1] / "fixtures" / "events" / "dev-smoke-entry.json"
 
 
 def payload() -> dict[str, JsonValue]:
@@ -41,6 +42,34 @@ def test_cloudwatch_alarm_event_is_normalized() -> None:
         "value": "ALARM",
         "reason": "synthetic test alarm",
         "timestamp": "2026-08-01T01:02:02Z",
+    }
+
+
+def test_anonymized_dev_smoke_envelope_is_accepted_by_alarm_event_boundary() -> None:
+    smoke_payload = cast(
+        dict[str, JsonValue], json.loads(DEV_SMOKE_FIXTURE.read_text(encoding="utf-8"))
+    )
+
+    event = parse_alarm_event(smoke_payload)
+
+    assert smoke_payload["account"] == "000000000000"
+    assert smoke_payload["region"] == "ap-northeast-2"
+    assert smoke_payload["source"] == "aws.cloudwatch"
+    assert smoke_payload["detail-type"] == "CloudWatch Alarm State Change"
+    assert smoke_payload["time"] == "2026-08-01T02:03:04Z"
+    assert smoke_payload["resources"] == [
+        "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-synthetic-smoke"
+    ]
+    assert event.event_id == "dev-smoke-event-001"
+    assert event.alarm_name == "pilo-dev-synthetic-smoke"
+    assert event.alarm_arn == (
+        "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-synthetic-smoke"
+    )
+    assert event.state_timestamp == datetime(2026, 8, 1, 2, 3, 3, tzinfo=UTC)
+    assert event.detail["state"] == {
+        "value": "ALARM",
+        "reason": "synthetic smoke test",
+        "timestamp": "2026-08-01T02:03:03Z",
     }
 
 

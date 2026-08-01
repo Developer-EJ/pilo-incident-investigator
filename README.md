@@ -94,4 +94,4 @@ gh repo view $env:PILO_INCIDENT_REPOSITORY --json nameWithOwner,visibility
 - 실제 식별자와 `*.tfvars`는 커밋하지 않습니다.
 - 저장된 Terraform plan을 사람이 검토해 Lambda, EventBridge, private S3, DynamoDB, IAM, 전용 log group 외 리소스 변경이 없음을 확인하기 전에는 apply하지 않습니다.
 
-실제 apply와 합성 Alarm smoke test는 별도의 보호 환경 작업에서 수행합니다.
+실제 apply와 합성 Alarm smoke test는 별도의 보호 환경 작업에서 수행합니다. 현재 protected smoke는 완료 선언이 아닌 승인 게이트 뒤의 절차이며, 전용 synthetic metric alarm만 사용하는 상세 순서는 [`docs/runbooks/dev-smoke-test.md`](docs/runbooks/dev-smoke-test.md)를 따릅니다.
