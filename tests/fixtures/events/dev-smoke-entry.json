@@ -1,6 +1,6 @@
 {
   "version": "0",
-  "id": "dev-smoke-event-001",
+  "id": "123e4567-e89b-12d3-a456-426614174000",
   "detail-type": "CloudWatch Alarm State Change",
   "source": "aws.cloudwatch",
   "account": "000000000000",

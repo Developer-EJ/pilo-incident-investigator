@@ -60,7 +60,7 @@ def test_anonymized_dev_smoke_envelope_is_accepted_by_alarm_event_boundary() -> 
     assert smoke_payload["resources"] == [
         "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-synthetic-smoke"
     ]
-    assert event.event_id == "dev-smoke-event-001"
+    assert event.event_id == "123e4567-e89b-12d3-a456-426614174000"
     assert event.alarm_name == "pilo-dev-synthetic-smoke"
     assert event.alarm_arn == (
         "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-synthetic-smoke"
