@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pilo_incident_investigator.domain import ToolRequest
+from pilo_incident_investigator.domain import CollectorFailure, ToolRequest
 from pilo_incident_investigator.evaluation.handoff import (
     CONDITIONS,
     HandoffClaim,
@@ -16,6 +16,7 @@ from pilo_incident_investigator.evaluation.handoff import (
     OfflineHandoffHarness,
     build_handoff_prompt,
     build_offline_handoff_harness,
+    fixture_digest,
     parse_handoff_output,
     prompt_digest,
     tool_registry_identifier,
@@ -52,6 +53,7 @@ def _recording(
         model_id=MODEL_ID,
         prompt_budget=PROMPT_BUDGET,
         prompt_digest=prompt_digest(prompt),
+        fixture_digest=fixture_digest(fixture),
         tool_registry_id=tool_registry_identifier(fixture),
         output=output
         or HandoffOutput(
@@ -527,3 +529,79 @@ def test_forbidden_actions_count_distinct_regex_matches_without_duplicate_text()
 
     assert paired_actions.forbidden_action_proposals == 2
     assert repeated_action.forbidden_action_proposals == 1
+
+
+@pytest.mark.parametrize(
+    "mutate_fixture",
+    [
+        lambda fixture: replace(
+            fixture,
+            snapshot=replace(
+                fixture.snapshot,
+                evidence=(replace(fixture.snapshot.evidence[0], summary="changed observation"),),
+            ),
+        ),
+        lambda fixture: replace(
+            fixture,
+            snapshot=replace(
+                fixture.snapshot,
+                failures=(CollectorFailure("changed", "failed", "changed failure"),),
+            ),
+        ),
+        lambda fixture: replace(
+            fixture,
+            handoff=replace(
+                fixture.handoff,
+                acceptable_first_direction_labels=frozenset({"changed_direction"}),
+            ),
+        ),
+        lambda fixture: replace(
+            fixture,
+            handoff=replace(
+                fixture.handoff,
+                allowed_clarification_kinds=frozenset({"changed_request"}),
+            ),
+        ),
+        lambda fixture: replace(
+            fixture,
+            topology=replace(
+                fixture.topology,
+                services=(
+                    replace(fixture.topology.services[0], log_groups=("/changed/log-group",)),
+                    *fixture.topology.services[1:],
+                ),
+            ),
+        ),
+    ],
+)
+def test_recording_rejects_same_id_fixture_state_mutations(
+    fixture: EvalFixture,
+    fixtures: tuple[EvalFixture, ...],
+    mutate_fixture: Callable[[EvalFixture], EvalFixture],
+) -> None:
+    harness = build_offline_handoff_harness(
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
+        recordings=_recordings(fixtures),
+    )
+
+    with pytest.raises(ValueError, match="provenance"):
+        harness.run_pair(mutate_fixture(fixture))
+
+
+def test_recording_rejects_tool_set_change_before_replay(
+    fixture: EvalFixture,
+    fixtures: tuple[EvalFixture, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pilo_incident_investigator.evaluation import handoff
+
+    harness = build_offline_handoff_harness(
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
+        recordings=_recordings(fixtures),
+    )
+    monkeypatch.setattr(handoff, "TOOL_NAMES", frozenset({"service_log_search"}))
+
+    with pytest.raises(ValueError, match="provenance"):
+        harness.run_pair(fixture)

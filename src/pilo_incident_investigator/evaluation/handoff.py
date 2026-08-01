@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 from pilo_incident_investigator.agent.contracts import cites_available_evidence
 from pilo_incident_investigator.agent.loop import MAX_TOTAL_TOOLS
@@ -27,6 +27,7 @@ from pilo_incident_investigator.domain import (
     ToolResult,
 )
 from pilo_incident_investigator.evaluation.schema import EvalFixture
+from pilo_incident_investigator.topology import Topology
 
 type HandoffCondition = Literal["raw_alarm", "incident_brief"]
 
@@ -83,6 +84,7 @@ class HandoffRecording:
     model_id: str
     prompt_budget: int
     prompt_digest: str
+    fixture_digest: str
     tool_registry_id: str
     output: HandoffOutput
 
@@ -206,7 +208,42 @@ def tool_registry_identifier(fixture: EvalFixture) -> str:
     payload: list[JsonValue] = []
     for result in _snapshot_recorded_tools(fixture.tool_results):
         payload.append(_tool_result_payload(result))
-    return hashlib.sha256(_canonical_json(sorted(payload, key=_tool_payload_sort_key))).hexdigest()
+    registry: dict[str, JsonValue] = {
+        "tool_names": _json_strings(sorted(TOOL_NAMES)),
+        "topology_allowlist": _topology_allowlist_payload(fixture.topology),
+        "recorded_tool_results": sorted(payload, key=_tool_payload_sort_key),
+    }
+    return hashlib.sha256(_canonical_json(registry)).hexdigest()
+
+
+def fixture_digest(fixture: EvalFixture) -> str:
+    """Bind a recording to all fixture state used by handoff execution or validation.
+
+    Expected outcomes are hashed only to detect fixture drift; they are never used to
+    construct a handoff prompt or model output.
+    """
+    tool_results: list[JsonValue] = [
+        _tool_result_payload(result) for result in _snapshot_recorded_tools(fixture.tool_results)
+    ]
+    payload: dict[str, JsonValue] = {
+        "fixture_id": fixture.fixture_id,
+        "scenario": fixture.scenario,
+        "variant": fixture.variant,
+        "alarm": _normalized_alarm_payload(fixture.alarm),
+        "topology": _topology_payload(fixture.topology),
+        "snapshot": _snapshot_payload(fixture),
+        "tool_results": sorted(tool_results, key=_tool_payload_sort_key),
+        "handoff": {
+            "acceptable_first_direction_labels": _json_strings(
+                sorted(fixture.handoff.acceptable_first_direction_labels)
+            ),
+            "allowed_clarification_kinds": _json_strings(
+                sorted(fixture.handoff.allowed_clarification_kinds)
+            ),
+        },
+        "expected": _expected_payload(fixture),
+    }
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
 
 
 def parse_handoff_output(
@@ -370,6 +407,7 @@ def _validate_recording_provenance(
         or recording.model_id != model_id
         or recording.prompt_budget != prompt_budget
         or recording.prompt_digest != prompt_digest(prompt)
+        or recording.fixture_digest != fixture_digest(fixture)
         or recording.tool_registry_id != registry_id
     ):
         raise ValueError("handoff recording provenance does not match replay context")
@@ -388,6 +426,70 @@ def _snapshot_recorded_tools(results: Mapping[str, ToolResult]) -> tuple[ToolRes
     for result in copied:
         _tool_result_payload(result)
     return copied
+
+
+def _topology_payload(topology: Topology) -> dict[str, JsonValue]:
+    if not isinstance(topology, Topology):
+        raise ValueError("fixture topology is invalid")
+    services: list[JsonValue] = []
+    for service in topology.services:
+        services.append(
+            {
+                "key": service.key,
+                "ecs_cluster": service.ecs_cluster,
+                "ecs_service": service.ecs_service,
+                "log_groups": _json_strings(service.log_groups),
+                "target_groups": _json_strings(service.target_groups),
+                "rds_instances": _json_strings(service.rds_instances),
+                "secrets": _json_strings(service.secrets),
+                "queues": _json_strings(service.queues),
+                "github_repository": service.github_repository,
+            }
+        )
+    alarm_mappings: list[JsonValue] = [
+        {"alarm_arn": alarm_arn, "service_keys": _json_strings(service_keys)}
+        for alarm_arn, service_keys in topology.alarm_mappings
+    ]
+    return {
+        "environment": topology.environment,
+        "region": topology.region,
+        "services": sorted(services, key=_tool_payload_sort_key),
+        "alarm_mappings": sorted(alarm_mappings, key=_tool_payload_sort_key),
+        "allowlist": _topology_allowlist_payload(topology),
+    }
+
+
+def _topology_allowlist_payload(topology: Topology) -> list[JsonValue]:
+    if not isinstance(topology, Topology):
+        raise ValueError("fixture topology is invalid")
+    return [
+        {"resource_type": resource_type, "resource_ids": _json_strings(sorted(resource_ids))}
+        for resource_type, resource_ids in sorted(topology._allowed_resources)
+    ]
+
+
+def _snapshot_payload(fixture: EvalFixture) -> dict[str, JsonValue]:
+    return {
+        "incident_id": fixture.snapshot.incident_id,
+        "evidence": [_evidence_payload(item) for item in fixture.snapshot.evidence],
+        "failures": [_failure_payload(item) for item in fixture.snapshot.failures],
+    }
+
+
+def _expected_payload(fixture: EvalFixture) -> dict[str, JsonValue]:
+    return {
+        "required_evidence_ids": _json_strings(sorted(fixture.expected.required_evidence_ids)),
+        "acceptable_direction_labels": _json_strings(
+            sorted(fixture.expected.acceptable_direction_labels)
+        ),
+        "useful_tools": _json_strings(sorted(fixture.expected.useful_tools)),
+        "classification": fixture.expected.classification,
+        "facts": [
+            {"text": fact.text, "evidence_ids": _json_strings(sorted(fact.evidence_ids))}
+            for fact in fixture.expected.facts
+        ],
+        "missing_information": _json_strings(fixture.expected.missing_information),
+    }
 
 
 def _tool_result_payload(result: ToolResult) -> dict[str, JsonValue]:
@@ -452,6 +554,10 @@ def _canonical_json(value: JsonValue) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError):
         raise ValueError("handoff canonical JSON is invalid") from None
+
+
+def _json_strings(values: Iterable[str]) -> list[JsonValue]:
+    return [cast(JsonValue, value) for value in values]
 
 
 def _copy_json_mapping(value: object) -> dict[str, JsonValue]:

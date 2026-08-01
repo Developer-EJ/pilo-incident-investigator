@@ -8,6 +8,7 @@ from pilo_incident_investigator.evaluation.handoff import (
     HandoffRecording,
     build_handoff_prompt,
     build_offline_handoff_harness,
+    fixture_digest,
     prompt_digest,
     tool_registry_identifier,
 )
@@ -35,6 +36,7 @@ def _recordings(fixtures: tuple[EvalFixture, ...]) -> dict[tuple[str, str], Hand
                 model_id=MODEL_ID,
                 prompt_budget=PROMPT_BUDGET,
                 prompt_digest=prompt_digest(prompt),
+                fixture_digest=fixture_digest(fixture),
                 tool_registry_id=tool_registry_identifier(fixture),
                 output=HandoffOutput(
                     text=(
