@@ -230,7 +230,7 @@ def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> N
     bundle = _safe_bundle()
     bundle.metadata["clientSecret"] = {
         "first": "opaque-one",
-        "nested": ["opaque-two", 3, False, None, {"last": "[REDACTED:SENSITIVE_FIELD]"}],
+        "nested": ["opaque-two", {"last": "[REDACTED:SENSITIVE_FIELD]"}],
     }
 
     redacted, report = Redactor().redact_bundle(bundle)
@@ -240,9 +240,6 @@ def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> N
         "first": "[REDACTED:SENSITIVE_FIELD]",
         "nested": [
             "[REDACTED:SENSITIVE_FIELD]",
-            3,
-            False,
-            None,
             {"last": "[REDACTED:SENSITIVE_FIELD]"},
         ],
     }
@@ -477,6 +474,77 @@ def test_redact_json_preserves_redacted_sentinels_and_rotation_metadata() -> Non
     value: JsonValue = {
         "password": "[REDACTED:SENSITIVE_FIELD]",
         "rotation_enabled": True,
+        "last_rotated_at": "2026-01-01T00:00:00Z",
+        "next_rotation_at": None,
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"token": 123456789},
+        {"password": True},
+        {"password": None},
+        {"clientSecret": [{"part": 7}]},
+        {"clientSecret": []},
+        {"clientSecret": {}},
+    ],
+)
+def test_redact_json_fails_closed_for_non_string_or_empty_sensitive_values(
+    value: JsonValue,
+) -> None:
+    with pytest.raises(UnsafeBundleError) as captured:
+        Redactor().redact_json(value)
+
+    rendered = repr(captured.value)
+    assert "123456789" not in rendered
+    assert "clientSecret" not in rendered
+
+
+def test_redact_json_accepts_only_approved_sentinels_in_sensitive_containers() -> None:
+    value: JsonValue = {
+        "clientSecret": [
+            "[REDACTED:SENSITIVE_FIELD]",
+            {"nested": "[REDACTED:SENSITIVE_FIELD]"},
+        ]
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+def test_redact_json_preserves_non_sensitive_primitives_and_empty_containers() -> None:
+    value: JsonValue = {
+        "count": 3,
+        "enabled": True,
+        "ratio": 1.25,
+        "missing": None,
+        "items": [],
+        "details": {},
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+    assert isinstance(redacted, dict)
+    assert type(redacted["count"]) is int
+    assert type(redacted["enabled"]) is bool
+    assert type(redacted["ratio"]) is float
+
+
+def test_redact_json_preserves_secret_rotation_metadata_primitives() -> None:
+    value: JsonValue = {
+        "rotation_enabled": True,
+        "rotation_interval_days": 30,
+        "rotation_progress": 0.5,
         "last_rotated_at": "2026-01-01T00:00:00Z",
         "next_rotation_at": None,
     }

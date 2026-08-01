@@ -471,6 +471,44 @@ def test_redacted_bundle_sentinel_and_rotation_metadata_remain_publishable() -> 
 @pytest.mark.parametrize(
     "bundle_bytes",
     [
+        b'{"token":123456789}',
+        b'{"password":true}',
+        b'{"password":null}',
+        b'{"clientSecret":[{"part":7}]}',
+        b'{"clientSecret":[]}',
+        b'{"clientSecret":{}}',
+    ],
+)
+def test_sensitive_non_string_or_empty_values_fail_before_every_sink(
+    bundle_bytes: bytes,
+) -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError) as captured:
+        payload(bundle_bytes=bundle_bytes)
+
+    assert calls == []
+    assert state.calls == []
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert "123456789" not in rendered
+    assert "clientSecret" not in rendered
+
+
+def test_sensitive_container_with_approved_sentinels_remains_publishable() -> None:
+    safe_bundle = (
+        b'{"clientSecret":["[REDACTED:SENSITIVE_FIELD]",{"nested":"[REDACTED:SENSITIVE_FIELD]"}]}'
+    )
+
+    publication = payload(bundle_bytes=safe_bundle)
+
+    assert publication.bundle_bytes == safe_bundle
+
+
+@pytest.mark.parametrize(
+    "bundle_bytes",
+    [
         b'{"value":NaN}',
         b'{"value":Infinity}',
         b'{"value":-Infinity}',

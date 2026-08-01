@@ -239,19 +239,25 @@ class Redactor:
     def _redact_json(
         self, value: JsonValue, counts: Counter[str], *, sensitive: bool = False
     ) -> JsonValue:
+        if sensitive:
+            if isinstance(value, str):
+                return self._redact_sensitive_field(value, counts)
+            if isinstance(value, list):
+                if not value:
+                    raise ValueError
+                return [self._redact_json(item, counts, sensitive=True) for item in value]
+            if isinstance(value, dict):
+                if not value:
+                    raise ValueError
+                return self._redact_sensitive_mapping(value, counts)
+            raise TypeError
         if value is None or isinstance(value, bool | int | float):
             return value
         if isinstance(value, str):
-            return (
-                self._redact_sensitive_field(value, counts)
-                if sensitive
-                else self._redact_text(value, counts)
-            )
+            return self._redact_text(value, counts)
         if isinstance(value, list):
-            return [self._redact_json(item, counts, sensitive=sensitive) for item in value]
+            return [self._redact_json(item, counts) for item in value]
         if isinstance(value, dict):
-            if sensitive:
-                return self._redact_sensitive_mapping(value, counts)
             return self._redact_mapping(value, counts)
         raise TypeError
 
