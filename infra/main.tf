@@ -89,7 +89,9 @@ resource "aws_lambda_function" "investigator" {
   handler       = local.lambda_handler_name
   architectures = ["x86_64"]
 
-  filename                       = var.lambda_zip_path
+  filename         = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+
   memory_size                    = 512
   timeout                        = 300
   reserved_concurrent_executions = 2

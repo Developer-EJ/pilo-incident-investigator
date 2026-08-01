@@ -13,7 +13,7 @@ mock_provider "aws" {
 }
 
 variables {
-  lambda_zip_path   = "../tests/fixtures/responses/lambda.zip"
+  lambda_zip_path   = "../dist/pilo-incident-investigator.zip"
   alarm_arns        = ["arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01"]
   bedrock_model_arn = "arn:aws:bedrock:ap-northeast-2:000000000000:inference-profile/synthetic-model"
   bedrock_foundation_model_arns = [
@@ -73,6 +73,11 @@ run "runtime_resources_are_bounded" {
   assert {
     condition     = aws_lambda_function.investigator.environment[0].variables.PILO_MODE == "snapshot_only"
     error_message = "The safe deployment default must remain snapshot_only."
+  }
+
+  assert {
+    condition     = aws_lambda_function.investigator.source_code_hash == filebase64sha256(var.lambda_zip_path)
+    error_message = "Terraform must detect Lambda artifact content changes at a stable path."
   }
 }
 
