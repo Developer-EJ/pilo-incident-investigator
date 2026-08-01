@@ -118,6 +118,7 @@ function Assert-DynamoIncidentState([object]$Item, [string]$ExpectedIncidentId) 
   if ($checkpoint -cnotin @("claimed", "snapshot_complete", "bundle_stored", "issue_published", "slack_attempted") -or $checkpointRank -notmatch "^[0-4]$" -or [int]$checkpointRank -ne $checkpointRanks[$checkpoint]) { throw "DynamoDB checkpoint is invalid" }
   if ($processingStatus -cnotin @("processing", "retryable", "complete") -or $slackStatus -cnotin @("not_attempted", "failed", "sent")) { throw "DynamoDB incident state enum is invalid" }
   if (($issuePublished -eq $true -and $bundleStored -ne $true) -or ($slackStatus -cne "not_attempted" -and $bundleStored -ne $true)) { throw "DynamoDB incident state has impossible publisher outcomes" }
+  if (([int]$checkpointRank -ge 2 -and $bundleStored -ne $true) -or ([int]$checkpointRank -eq 3 -and $issuePublished -ne $true) -or ([int]$checkpointRank -ge 4 -and $slackStatus -ceq "not_attempted")) { throw "DynamoDB checkpoint is ahead of required publisher outcomes" }
   if ($processingStatus -ceq "complete" -and ($bundleStored -ne $true -or $issuePublished -ne $true -or $slackStatus -cne "sent" -or $checkpoint -cne "slack_attempted" -or $checkpointRank -ne "4")) { throw "DynamoDB complete incident state is invalid" }
   return [pscustomobject]@{ IsComplete = $processingStatus -ceq "complete" }
 }
@@ -228,7 +229,7 @@ function Assert-RuntimeBinding {
   Assert-ExactSingleton $pattern.detail.state.value "ALARM" "EventBridge alarm state is invalid"
   $targets = Get-AwsJson @("events", "list-targets-by-rule", "--rule", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge target inspection failed"
   $targetItems = @($targets.Targets | Where-Object { $null -ne $_ })
-  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -ne $lambdaFunctionArn) { throw "EventBridge target must bind exactly one Lambda" }
+  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -cne $lambdaFunctionArn) { throw "EventBridge target must bind exactly one Lambda" }
   foreach ($field in @("Input", "InputPath", "InputTransformer")) {
     if ($null -ne $targetItems[0].PSObject.Properties[$field]) { throw "EventBridge target must bind the unmodified event to exactly one Lambda" }
   }
