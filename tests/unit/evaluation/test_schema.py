@@ -220,6 +220,80 @@ def test_unknown_and_composite_fixtures_must_be_unclassified(variant: str) -> No
         EvalFixture.from_dict(raw)
 
 
+def _clear_direction_labels(raw: dict[str, JsonValue]) -> None:
+    expected = _mapping(raw, "expected")
+    expected["acceptable_direction_labels"] = []
+    handoff = _mapping(raw, "handoff")
+    handoff["acceptable_first_direction_labels"] = []
+
+
+def _make_evidence_free_unknown(raw: dict[str, JsonValue]) -> None:
+    raw["variant"] = "unknown"
+    snapshot = _mapping(raw, "snapshot")
+    snapshot["evidence"] = []
+    raw["tool_results"] = {}
+    expected = _mapping(raw, "expected")
+    expected["required_evidence_ids"] = []
+    expected["facts"] = []
+
+
+def test_evidence_free_unknown_allows_no_direction_labels() -> None:
+    raw = minimal_fixture()
+    _make_evidence_free_unknown(raw)
+    _clear_direction_labels(raw)
+
+    fixture = EvalFixture.from_dict(raw)
+
+    assert fixture.expected.acceptable_direction_labels == frozenset()
+    assert fixture.handoff.acceptable_first_direction_labels == frozenset()
+
+
+def test_unknown_with_only_tool_evidence_requires_direction_labels() -> None:
+    raw = minimal_fixture()
+    recorded_tool_results = raw["tool_results"]
+    _make_evidence_free_unknown(raw)
+    raw["tool_results"] = recorded_tool_results
+    _clear_direction_labels(raw)
+
+    with pytest.raises(FixtureValidationError, match="direction labels"):
+        EvalFixture.from_dict(raw)
+
+
+@pytest.mark.parametrize("variant", ["complete", "composite"])
+def test_non_unknown_and_composite_require_direction_labels(variant: str) -> None:
+    raw = minimal_fixture()
+    raw["variant"] = variant
+    _clear_direction_labels(raw)
+
+    with pytest.raises(FixtureValidationError, match="direction labels"):
+        EvalFixture.from_dict(raw)
+
+
+def test_unknown_with_evidence_requires_direction_labels() -> None:
+    raw = minimal_fixture()
+    raw["variant"] = "unknown"
+    _clear_direction_labels(raw)
+
+    with pytest.raises(FixtureValidationError, match="direction labels"):
+        EvalFixture.from_dict(raw)
+
+
+@pytest.mark.parametrize("empty_side", ["expected", "handoff"])
+def test_direction_label_emptiness_must_match(empty_side: str) -> None:
+    raw = minimal_fixture()
+    _make_evidence_free_unknown(raw)
+    section = _mapping(raw, empty_side)
+    field = (
+        "acceptable_direction_labels"
+        if empty_side == "expected"
+        else "acceptable_first_direction_labels"
+    )
+    section[field] = []
+
+    with pytest.raises(FixtureValidationError, match="both be empty"):
+        EvalFixture.from_dict(raw)
+
+
 @pytest.mark.parametrize(
     "value",
     [
