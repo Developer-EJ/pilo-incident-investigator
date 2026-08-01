@@ -83,6 +83,29 @@ class ToolRegistry:
         topology: Topology,
         seen: set[str],
     ) -> ToolResult:
+        self._validate(request, topology, seen)
+        result = self._handlers[request.tool].execute(request)
+        seen.add(request.deduplication_key())
+        return result
+
+    def validate_batch(
+        self,
+        requests: tuple[ToolRequest, ...],
+        topology: Topology,
+        seen: set[str],
+    ) -> None:
+        """Validate a complete planner round without invoking a remote handler."""
+        pending = set(seen)
+        for request in requests:
+            self._validate(request, topology, pending)
+            pending.add(request.deduplication_key())
+
+    def _validate(
+        self,
+        request: ToolRequest,
+        topology: Topology,
+        seen: set[str],
+    ) -> None:
         if request.tool not in TOOL_NAMES:
             raise ToolDenied("unknown Tool")
         if not request.reason.strip():
@@ -94,9 +117,6 @@ class ToolRegistry:
             topology.require_allowed(_RESOURCE_TYPES[request.tool], request.resource_key)
         except TopologyDenied:
             raise ToolDenied("Tool resource is not allowlisted") from None
-        result = self._handlers[request.tool].execute(request)
-        seen.add(key)
-        return result
 
 
 class ServiceLogSearchTool:

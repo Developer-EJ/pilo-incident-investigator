@@ -518,7 +518,9 @@ git commit -m "feat: constrain incident investigation tools"
 - Produces: `BedrockPlanner.summarize(snapshot, tool_results=()) -> Investigation` for the no-Tool `snapshot_only` path.
 - Produces: `InvestigationAgent.run(snapshot, topology) -> Investigation`.
 - Produces: a `Planner` protocol containing both `propose` and `summarize`, reused by offline evaluation fakes.
-- `AgentProposal` contains zero to three `ToolRequest` values plus `facts`, `directions`, `missing`, and `classification` fields that cite Evidence IDs.
+- `AgentProposal` contains zero to three `ToolRequest` values plus `facts`, `directions`, `missing`, `classification`, and `classification_evidence_ids`. `unclassified` 외의 분류는 현재 Evidence 집합의 ID를 하나 이상 인용하고, 해당 인용은 최종 `Investigation`까지 보존한다.
+- Hybrid 조사는 Tool 선택 `propose`를 최대 2회 호출한 뒤, 수집된 모든 Tool Evidence를 반영하는 최종 `summarize`를 최대 1회 호출한다. 따라서 모델 호출 상한은 총 3회다. 이 최종 synthesis는 Tool 선택 round에 포함하지 않으며 추가 Tool을 요청할 수 없다.
+- `snapshot_only`는 Tool schema 없이 `summarize`를 최대 1회만 호출한다.
 
 - [ ] **Step 1: Write budget, timeout, duplicate, and invalid-citation tests**
 
@@ -527,7 +529,8 @@ def test_agent_never_executes_more_than_six_tools() -> None:
     planner = ScriptedPlanner([three_requests(1), three_requests(2), three_requests(3)])
     result = InvestigationAgent(planner, recording_registry()).run(snapshot(), topology())
     assert len(result.tool_calls) == 6
-    assert planner.call_count == 2
+    assert planner.propose_count == 2
+    assert planner.summarize_count == 1
 
 
 def test_model_timeout_returns_snapshot_only_investigation() -> None:
@@ -562,15 +565,17 @@ for round_index in range(MAX_ROUNDS):
     for request in requests:
         results.append(registry.execute(request, topology, seen))
         seen.add(request.deduplication_key())
+
+investigation = planner.summarize(snapshot, tuple(results))
 ```
 
-Send only normalized Snapshot Evidence, previous Tool Evidence, permitted Tool schema, and remaining budget to Bedrock. Reject unknown JSON fields, unknown Tool names, missing reasons, and Evidence citations not present in the current Evidence set. `summarize` omits the Tool schema entirely. Catch Bedrock timeout/throttling/invalid output and return a template `unclassified` Investigation from the Snapshot.
+Send only normalized Snapshot Evidence, previous Tool Evidence, permitted Tool schema, and remaining budget to Bedrock. Reject unknown JSON fields, unknown Tool names, missing reasons, and Evidence citations not present in the current Evidence set. `summarize` omits the Tool schema entirely and cannot request additional Tools. The final synthesis receives all completed Tool results, including the second selection round. Catch Bedrock timeout/throttling/invalid output and return a template `unclassified` Investigation from the Snapshot while preserving already completed Tool results.
 
 - [ ] **Step 4: Run Agent tests including malformed model output**
 
 Run: `python -m pytest tests/unit/agent/test_bedrock.py tests/unit/agent/test_loop.py -q`
 
-Expected: PASS with exactly two planner calls at most and six Tool executions at most.
+Expected: PASS with at most two `propose` calls, one final `summarize` call, three total model calls, and six Tool executions. `snapshot_only` uses only one `summarize` call.
 
 - [ ] **Step 5: Commit the bounded Agent**
 
