@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import traceback
 from dataclasses import dataclass
 from typing import Any
@@ -439,10 +440,26 @@ def test_slack_webhook_sends_bounded_json_and_has_safe_repr() -> None:
     assert method == "POST"
     assert url == webhook
     assert headers == {"Content-Type": "application/json; charset=utf-8"}
-    assert body == b'{"text":"inc-123 \\u2014 bounded summary"}'
+    assert body == '{"text":"inc-123 — bounded summary"}'.encode()
     assert timeout == 5.0
     assert repr(client) == "SlackWebhookClient(redacted=True)"
     assert webhook not in repr(client)
+
+
+def test_slack_webhook_accepts_bounded_korean_summary_without_ascii_expansion() -> None:
+    transport = WebTransport(WebResponse(status=200, body=b"ok"))
+    client = SlackWebhookClient(
+        "https://hooks.slack.com/services/T000/B000/SAFEEXAMPLE",
+        transport=transport,
+    )
+    text = "가" * MAX_SLACK_SUMMARY_CHARS
+
+    client.send_text(text)
+
+    body = transport.calls[0][3]
+    assert body is not None
+    assert json.loads(body) == {"text": text}
+    assert len(body) <= 3_000
 
 
 @pytest.mark.parametrize(

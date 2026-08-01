@@ -126,7 +126,7 @@ class SlackWebhookClient:
     def send_text(self, text: str) -> None:
         if not isinstance(text, str) or not text:
             raise ValueError("Slack text must be a non-empty string")
-        body = json.dumps({"text": text}, ensure_ascii=True, separators=(",", ":")).encode()
+        body = json.dumps({"text": text}, ensure_ascii=False, separators=(",", ":")).encode()
         if len(body) > MAX_SLACK_MESSAGE_BYTES:
             raise ValueError("Slack message exceeds the bounded payload size")
         try:
