@@ -49,14 +49,17 @@ GitHub 게시 token과 Slack Incoming Webhook URL은 서비스 전용 SSM Secure
 - Collector 일부 실패는 숨기지 말고 누락 정보와 실패 상태로 보존한다.
 - 실제 리소스 식별자나 민감한 topology는 커밋하지 않는다. 공개 저장소에는 익명화된 topology 예시만 둘 수 있다.
 
-## 테스트·검증 명령의 예정 계약
+## 테스트·검증 명령 계약
 
-아래 명령은 **구현 완료 시 제공할 계약**이다. 현재 저장소에는 실행 파일, Makefile, 테스트 또는 Terraform 구성이 없으므로 **지금 실행 가능한 명령이 아니다**.
+현재 저장소에는 Python 3.12 개발 의존성을 설치한 환경에서 실행할 수 있는 다음 명령이 제공된다.
 
-- `make check`: 포맷, 정적 분석, 문서 및 보안 규칙 검사를 실행한다.
-- `make test`: 단위·통합 테스트를 실행하며 기본적으로 실제 AWS, Slack, GitHub를 변경하지 않는다.
-- `make eval`: 익명화된 21개 fixture로 `snapshot_only`와 `hybrid_agent`를 비교한다.
-- `make terraform-check`: Terraform 포맷과 정적 검증을 실행하되 apply는 수행하지 않는다.
-- `make verify`: 위 검증을 한 번에 실행하는 최종 로컬/CI 진입점이다.
+- `make check`: 현재 Python 소스와 테스트에 Ruff 검사·포맷 확인 및 mypy strict 검사를 실행한다.
+- `make test`: 현재 구현된 단위·통합 테스트를 실행하며 실제 AWS, Slack, GitHub를 변경하지 않는다.
 
-구현 시 이 계약을 실제 명령으로 제공하거나, 사용자 승인을 받아 이 문서와 함께 명시적으로 변경해야 한다. 외부 연동 테스트는 별도의 명시적 opt-in과 격리된 테스트 대상을 요구하며 기본 검증 경로에 포함하지 않는다.
+다음 target은 Makefile에 예약돼 있지만, 해당 구현이 끝나기 전에는 성공하는 명령으로 간주하지 않는다.
+
+- `make eval`: 익명화된 21개 fixture와 평가 harness 구현이 완료되면 `snapshot_only`와 `hybrid_agent`를 비교한다.
+- `make terraform-check`: `infra/` 구현이 완료되면 Terraform 포맷과 정적 검증을 실행하되 apply는 수행하지 않는다.
+- `make verify`: 런타임·Terraform·eval 구현이 모두 완료되면 위 검증을 한 번에 실행하는 최종 로컬/CI 진입점이 된다.
+
+명령 계약을 변경하려면 사용자 승인과 이 문서의 동시 수정이 필요하다. 외부 연동 테스트는 별도의 명시적 opt-in과 격리된 테스트 대상을 요구하며 기본 검증 경로에 포함하지 않는다.

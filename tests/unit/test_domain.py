@@ -84,6 +84,18 @@ def test_evidence_rejects_non_json_data() -> None:
         )
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_evidence_rejects_non_finite_json_numbers(value: float) -> None:
+    with pytest.raises(TypeError, match="finite"):
+        Evidence(
+            evidence_id="E-001",
+            source="ecs.describe_services",
+            observed_at=datetime(2026, 8, 1, tzinfo=UTC),
+            summary="invalid numeric payload",
+            data={"value": value},
+        )
+
+
 def test_alarm_requires_timezone_aware_timestamp() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         AlarmEvent(

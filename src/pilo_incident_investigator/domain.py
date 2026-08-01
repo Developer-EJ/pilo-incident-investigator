@@ -2,11 +2,14 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
 def _require_json_safe(value: object, path: str) -> None:
+    if isinstance(value, float) and not isfinite(value):
+        raise TypeError(f"{path} must contain only finite JSON numbers")
     if value is None or isinstance(value, bool | int | float | str):
         return
     if isinstance(value, list):
