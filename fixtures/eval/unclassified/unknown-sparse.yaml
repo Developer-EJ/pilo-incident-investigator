@@ -24,11 +24,11 @@ snapshot:
 tool_results: {}
 expected:
   required_evidence_ids: []
-  acceptable_direction_labels: ["request_missing_target_context"]
+  acceptable_direction_labels: []
   useful_tools: []
   classification: "unclassified"
   facts: []
   missing_information: ["target_mapping","related_logs","target_health","pilo_service_states"]
 handoff:
-  acceptable_first_direction_labels: ["request_missing_target_context"]
+  acceptable_first_direction_labels: []
   allowed_clarification_kinds: ["request_missing_evidence"]

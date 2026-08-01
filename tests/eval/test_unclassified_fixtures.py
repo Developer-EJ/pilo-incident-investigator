@@ -25,7 +25,7 @@ GUARDED_FIXTURE_IDS = {
 EXPECTED_CONTRACTS = {
     "unknown-sparse": {
         "variant": "unknown",
-        "direction": "request_missing_target_context",
+        "directions": set(),
         "missing": {
             "target_mapping",
             "related_logs",
@@ -35,12 +35,12 @@ EXPECTED_CONTRACTS = {
     },
     "unknown-conflicting": {
         "variant": "unknown",
-        "direction": "inspect_unobserved_dependency_without_claiming_root_cause",
+        "directions": {"inspect_unobserved_dependency_without_claiming_root_cause"},
         "missing": {"downstream_dependency_status", "longer_log_window"},
     },
     "composite-deploy-and-backlog": {
         "variant": "composite",
-        "direction": "separate_deployment_and_queue_hypotheses",
+        "directions": {"separate_deployment_and_queue_hypotheses"},
         "missing": {"causal_order_between_deploy_and_consumer_failure"},
     },
 }
@@ -108,7 +108,7 @@ def test_unknown_and_composite_are_conservatively_unclassified(
     assert all(item.expected.missing_information for item in guarded)
 
 
-def test_guarded_fixtures_encode_the_three_approved_ambiguity_patterns(
+def test_guarded_fixtures_keep_only_evidence_supported_direction_expectations(
     fixtures: tuple[EvalFixture, ...],
 ) -> None:
     by_id = {item.fixture_id: item for item in _guarded(fixtures)}
@@ -116,14 +116,16 @@ def test_guarded_fixtures_encode_the_three_approved_ambiguity_patterns(
     for fixture_id, contract in EXPECTED_CONTRACTS.items():
         fixture = by_id[fixture_id]
         assert fixture.variant == contract["variant"]
-        assert fixture.expected.acceptable_direction_labels == frozenset({contract["direction"]})
-        assert fixture.handoff.acceptable_first_direction_labels == frozenset(
-            {contract["direction"]}
-        )
+        directions = frozenset(cast(set[str], contract["directions"]))
+        assert fixture.expected.acceptable_direction_labels == directions
+        assert fixture.handoff.acceptable_first_direction_labels == directions
         assert set(fixture.expected.missing_information) == contract["missing"]
 
     sparse = by_id["unknown-sparse"]
+    # Evidence가 없을 때 방향을 정답으로 강제하면 Evidence ID 없는 판단을 보상하게 된다.
     assert sparse.snapshot.evidence == ()
+    assert sparse.expected.acceptable_direction_labels == frozenset()
+    assert sparse.handoff.acceptable_first_direction_labels == frozenset()
     assert sparse.expected.required_evidence_ids == frozenset()
     assert sparse.expected.facts == ()
     assert sparse.topology.resolve_alarm(str(sparse.alarm["alarm_arn"])) == ()

@@ -127,6 +127,7 @@ class EvalFixture:
             expected = _parse_expected(raw["expected"])
             handoff = _parse_handoff(raw["handoff"])
             _validate_evidence_contract(snapshot, tool_results, expected)
+            _validate_direction_contract(variant, snapshot, tool_results, expected, handoff)
             if variant in {"unknown", "composite"} and expected.classification != "unclassified":
                 raise FixtureValidationError(
                     "unknown and composite fixtures must expect unclassified"
@@ -425,7 +426,6 @@ def _parse_expected(value: JsonValue) -> ExpectedOutcome:
     direction_labels = _string_set(
         raw["acceptable_direction_labels"],
         "expected.acceptable_direction_labels",
-        require_non_empty=True,
     )
     useful_tools = _string_set(raw["useful_tools"], "expected.useful_tools")
     if not useful_tools.issubset(TOOL_NAMES):
@@ -468,7 +468,6 @@ def _parse_handoff(value: JsonValue) -> HandoffExpectation:
         acceptable_first_direction_labels=_string_set(
             raw["acceptable_first_direction_labels"],
             "handoff.acceptable_first_direction_labels",
-            require_non_empty=True,
         ),
         allowed_clarification_kinds=_string_set(
             raw["allowed_clarification_kinds"], "handoff.allowed_clarification_kinds"
@@ -492,6 +491,26 @@ def _validate_evidence_contract(
     referenced.update(evidence_id for claim in expected.facts for evidence_id in claim.evidence_ids)
     if not referenced.issubset(available):
         raise FixtureValidationError("expected outcome references an absent Evidence ID")
+
+
+def _validate_direction_contract(
+    variant: FixtureVariant,
+    snapshot: Snapshot,
+    tool_results: dict[str, ToolResult],
+    expected: ExpectedOutcome,
+    handoff: HandoffExpectation,
+) -> None:
+    expected_empty = not expected.acceptable_direction_labels
+    handoff_empty = not handoff.acceptable_first_direction_labels
+    if expected_empty != handoff_empty:
+        raise FixtureValidationError("expected and handoff direction labels must both be empty")
+    has_evidence = bool(snapshot.evidence) or any(
+        result.evidence for result in tool_results.values()
+    )
+    if expected_empty and (variant != "unknown" or has_evidence):
+        raise FixtureValidationError(
+            "direction labels may be empty only for an evidence-free unknown fixture"
+        )
 
 
 def _parse_variant(value: JsonValue) -> FixtureVariant:
