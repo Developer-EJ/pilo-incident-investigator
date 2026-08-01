@@ -2,7 +2,12 @@ from typing import Any, cast
 
 from botocore.exceptions import ClientError
 
-from pilo_incident_investigator.state import Checkpoint, DynamoIncidentStateStore
+from pilo_incident_investigator.state import (
+    Checkpoint,
+    ClaimDisposition,
+    DynamoIncidentStateStore,
+    ProcessingStatus,
+)
 
 
 class InMemoryConditionalTable:
@@ -10,6 +15,7 @@ class InMemoryConditionalTable:
         self.items: dict[str, dict[str, object]] = {}
         self.put_calls: list[dict[str, Any]] = []
         self.update_calls: list[dict[str, Any]] = []
+        self.get_calls: list[dict[str, Any]] = []
 
     def put_item(self, **kwargs: Any) -> dict[str, Any]:
         self.put_calls.append(kwargs)
@@ -25,17 +31,55 @@ class InMemoryConditionalTable:
         event_id = kwargs["Key"]["event_id"]
         values = kwargs["ExpressionAttributeValues"]
         item = self.items.get(event_id)
+        if ":retryable" in values:
+            if (
+                item is None
+                or item["incident_id"] != values[":incident_id"]
+                or item["processing_status"] == values[":complete"]
+                or (
+                    item["processing_status"] != values[":retryable"]
+                    and cast(int, item["lease_expires_at"]) >= cast(int, values[":now"])
+                )
+            ):
+                raise conditional_failure()
+            item["processing_status"] = values[":processing"]
+            item["attempt_id"] = values[":attempt_id"]
+            item["lease_expires_at"] = values[":lease_expires_at"]
+            return {"Attributes": dict(item)}
+        if ":next_status" in values:
+            if (
+                item is None
+                or item["attempt_id"] != values[":attempt_id"]
+                or item["processing_status"] != values[":expected_status"]
+            ):
+                raise conditional_failure()
+            item["processing_status"] = values[":next_status"]
+            return {}
         if ":outcome" in values:
-            if item is None:
+            if (
+                item is None
+                or item["attempt_id"] != values[":attempt_id"]
+                or item["processing_status"] != values[":processing"]
+            ):
                 raise conditional_failure()
             attribute = kwargs["ExpressionAttributeNames"]["#outcome"]
             item[attribute] = values[":outcome"]
             return {}
-        if item is None or cast(int, item["checkpoint_rank"]) >= cast(int, values[":next_rank"]):
+        if (
+            item is None
+            or item["attempt_id"] != values[":attempt_id"]
+            or item["processing_status"] != values[":processing"]
+            or cast(int, item["checkpoint_rank"]) >= cast(int, values[":next_rank"])
+        ):
             raise conditional_failure()
         item["checkpoint"] = values[":next_checkpoint"]
         item["checkpoint_rank"] = values[":next_rank"]
         return {}
+
+    def get_item(self, **kwargs: Any) -> dict[str, Any]:
+        self.get_calls.append(kwargs)
+        item = self.items.get(kwargs["Key"]["event_id"])
+        return {} if item is None else {"Item": dict(item)}
 
 
 def conditional_failure() -> ClientError:
@@ -47,7 +91,7 @@ def conditional_failure() -> ClientError:
 
 def test_claim_uses_attribute_not_exists_and_is_idempotent() -> None:
     table = InMemoryConditionalTable()
-    store = DynamoIncidentStateStore(table)
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
 
     assert store.claim_event("evt-001", "inc-abc") is True
     assert store.claim_event("evt-001", "inc-abc") is False
@@ -60,6 +104,9 @@ def test_claim_uses_attribute_not_exists_and_is_idempotent() -> None:
         "bundle_stored": False,
         "issue_published": False,
         "slack_status": "not_attempted",
+        "processing_status": "processing",
+        "attempt_id": "legacy-inc-abc",
+        "lease_expires_at": 1_900,
     }
 
 
@@ -70,7 +117,7 @@ def test_checkpoints_only_move_forward_and_retries_are_idempotent() -> None:
 
     assert store.mark_snapshot_complete("evt-001") is True
     assert store.mark_bundle_stored("evt-001") is True
-    assert store.mark_snapshot_complete("evt-001") is False
+    assert store.mark_snapshot_complete("evt-001") is True
     assert store.mark_bundle_stored("evt-001") is True
     assert store.mark_issue_published("evt-001") is True
     assert store.mark_slack_attempted("evt-001", "sent") is True
@@ -88,7 +135,11 @@ def test_checkpoints_only_move_forward_and_retries_are_idempotent() -> None:
         4,
     ]
     assert all(
-        call["ConditionExpression"] == "attribute_exists(event_id) AND checkpoint_rank < :next_rank"
+        call["ConditionExpression"]
+        == (
+            "attribute_exists(event_id) AND attempt_id = :attempt_id AND "
+            "processing_status = :processing AND checkpoint_rank < :next_rank"
+        )
         for call in rank_calls
     )
     assert table.items["evt-001"]["bundle_stored"] is True
@@ -178,3 +229,71 @@ def test_checkpoint_values_are_stable() -> None:
         "issue_published",
         "slack_attempted",
     )
+
+
+def test_retryable_event_is_atomically_resumed_and_completed() -> None:
+    table = InMemoryConditionalTable()
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
+
+    first = store.begin_event("evt-001", "inc-abc", "attempt-a")
+    assert first.disposition is ClaimDisposition.STARTED
+    assert store.mark_retryable("evt-001", "attempt-a") is True
+
+    resumed = store.begin_event("evt-001", "inc-abc", "attempt-b")
+    assert resumed.disposition is ClaimDisposition.RESUMED
+    assert resumed.attempt_id == "attempt-b"
+    assert store.mark_complete("evt-001", "attempt-b") is True
+
+    complete = store.begin_event("evt-001", "inc-abc", "attempt-c")
+    assert complete.disposition is ClaimDisposition.COMPLETE
+    assert complete.attempt_id is None
+    assert table.items["evt-001"]["processing_status"] == ProcessingStatus.COMPLETE.value
+
+
+def test_legacy_claim_does_not_accidentally_acquire_retryable_event() -> None:
+    table = InMemoryConditionalTable()
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
+    store.begin_event("evt-001", "inc-abc", "attempt-a")
+    assert store.mark_retryable("evt-001", "attempt-a") is True
+
+    assert store.claim_event("evt-001", "inc-abc") is False
+    assert table.items["evt-001"]["processing_status"] == ProcessingStatus.RETRYABLE.value
+    assert table.items["evt-001"]["attempt_id"] == "attempt-a"
+
+
+def test_active_event_is_busy_until_its_lease_expires() -> None:
+    table = InMemoryConditionalTable()
+    now = [1_000]
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: now[0])
+    assert (
+        store.begin_event("evt-001", "inc-abc", "attempt-a").disposition is ClaimDisposition.STARTED
+    )
+
+    assert store.begin_event("evt-001", "inc-abc", "attempt-b").disposition is ClaimDisposition.BUSY
+    now[0] = 1_901
+    resumed = store.begin_event("evt-001", "inc-abc", "attempt-c")
+
+    assert resumed.disposition is ClaimDisposition.RESUMED
+    assert table.items["evt-001"]["attempt_id"] == "attempt-c"
+
+
+def test_only_current_attempt_can_change_processing_status() -> None:
+    table = InMemoryConditionalTable()
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
+    store.begin_event("evt-001", "inc-abc", "attempt-a")
+
+    assert store.mark_retryable("evt-001", "attempt-other") is False
+    assert store.mark_complete("evt-001", "attempt-other") is False
+    assert store.mark_complete("evt-001", "attempt-a") is True
+
+
+def test_expired_attempt_cannot_write_publisher_outcomes_after_resume() -> None:
+    table = InMemoryConditionalTable()
+    old_store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
+    new_store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_901)
+    old_store.begin_event("evt-001", "inc-abc", "attempt-old")
+    resumed = new_store.begin_event("evt-001", "inc-abc", "attempt-new")
+
+    assert resumed.disposition is ClaimDisposition.RESUMED
+    assert old_store.mark_bundle_stored("evt-001") is False
+    assert new_store.mark_bundle_stored("evt-001") is True

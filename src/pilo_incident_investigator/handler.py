@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -54,7 +56,12 @@ from pilo_incident_investigator.publishers import (
 )
 from pilo_incident_investigator.redaction import Redactor
 from pilo_incident_investigator.snapshot import SnapshotCollector
-from pilo_incident_investigator.state import DynamoIncidentStateStore, DynamoTable
+from pilo_incident_investigator.state import (
+    ClaimDisposition,
+    DynamoIncidentStateStore,
+    DynamoTable,
+    EventClaim,
+)
 from pilo_incident_investigator.topology import Topology
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,9 +69,13 @@ _MAX_TOPOLOGY_BYTES = 256_000
 
 
 class RuntimeState(Protocol):
-    def claim_event(self, event_id: str, incident_id: str) -> bool: ...
+    def begin_event(self, event_id: str, incident_id: str, attempt_id: str) -> EventClaim: ...
 
     def mark_snapshot_complete(self, event_id: str) -> bool: ...
+
+    def mark_retryable(self, event_id: str, attempt_id: str) -> bool: ...
+
+    def mark_complete(self, event_id: str, attempt_id: str) -> bool: ...
 
 
 class TopologyProvider(Protocol):
@@ -99,6 +110,14 @@ class RuntimeStateError(RuntimeError):
 
 class TopologyLoadError(RuntimeError):
     """Sanitized protected-topology loading failure."""
+
+
+class IncidentBusyError(RuntimeError):
+    """Raised so EventBridge retries an event currently owned by another attempt."""
+
+
+class RetryablePublicationError(RuntimeError):
+    """Raised after a degraded publication so the same Incident can resume."""
 
 
 class S3TopologyProvider:
@@ -151,6 +170,7 @@ class Runtime:
         publisher: IncidentPublisher,
         now: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
+        attempt_id: Callable[[], str] | None = None,
     ) -> None:
         if mode not in {"snapshot_only", "hybrid_agent"}:
             raise ValueError("runtime mode is invalid")
@@ -163,20 +183,29 @@ class Runtime:
         self._publisher = publisher
         self._now = now or (lambda: datetime.now(UTC))
         self._monotonic = monotonic or time.monotonic
+        self._attempt_id = attempt_id or (lambda: secrets.token_hex(16))
 
     def handle(self, event: dict[str, JsonValue]) -> dict[str, str]:
         started = self._monotonic()
         incident_id = "unavailable"
         stage = "parse_event"
+        active_attempt: str | None = None
         try:
             alarm = parse_alarm_event(event)
             incident_id = incident_id_for(alarm.event_id)
             stage = "load_topology"
             topology = self._topology.load()
             stage = "claim_event"
-            if not self._state.claim_event(alarm.event_id, incident_id):
+            attempt_id = self._attempt_id()
+            claim = self._state.begin_event(alarm.event_id, incident_id, attempt_id)
+            if claim.disposition is ClaimDisposition.COMPLETE:
                 self._log(incident_id, "duplicate", started)
                 return {"incident_id": incident_id, "status": "duplicate"}
+            if claim.disposition is ClaimDisposition.BUSY:
+                raise IncidentBusyError("incident processing is already in progress")
+            if claim.attempt_id != attempt_id:
+                raise RuntimeStateError("state returned an invalid processing claim")
+            active_attempt = attempt_id
 
             stage = "snapshot"
             snapshot = self._snapshots.collect(alarm, topology)
@@ -184,10 +213,13 @@ class Runtime:
                 raise RuntimeStateError("snapshot checkpoint was not recorded")
 
             stage = "investigation"
-            if self._mode == "snapshot_only":
+            if not topology.resolve_alarm(alarm.alarm_arn):
+                investigation = _unknown_alarm_investigation(snapshot)
+            elif self._mode == "snapshot_only":
                 investigation = self._planner.summarize(snapshot, tool_results=())
             else:
                 investigation = self._hybrid_agent.run(snapshot, topology)
+            investigation = _preserve_collector_failures(investigation, snapshot)
 
             stage = "render"
             bundle = IncidentBundle(
@@ -209,14 +241,27 @@ class Runtime:
 
             stage = "publish"
             result = self._publisher.publish(publication)
-            status = (
-                "published"
-                if result.issue_url is not None and result.slack_status == "sent"
-                else "degraded"
-            )
-            self._log(incident_id, status, started)
-            return {"incident_id": incident_id, "status": status}
+            if result.issue_url is None or result.slack_status != "sent":
+                raise RetryablePublicationError("incident publication is degraded")
+            if not self._state.mark_complete(alarm.event_id, attempt_id):
+                raise RuntimeStateError("completed event state was not recorded")
+            active_attempt = None
+            self._log(incident_id, "published", started)
+            return {"incident_id": incident_id, "status": "published"}
         except Exception as error:
+            if active_attempt is not None:
+                try:
+                    self._state.mark_retryable(alarm.event_id, active_attempt)
+                except Exception as state_error:
+                    _LOGGER.error(
+                        "incident_retry_state_failed",
+                        extra={
+                            "incident_id": incident_id,
+                            "stage": stage,
+                            "duration_ms": _duration_ms(started, self._monotonic()),
+                            "failure_code": type(state_error).__name__,
+                        },
+                    )
             _LOGGER.error(
                 "incident_failed",
                 extra={
@@ -313,3 +358,25 @@ def lambda_handler(event: dict[str, JsonValue], context: object) -> dict[str, st
 
 def _duration_ms(started: float, finished: float) -> int:
     return max(0, round((finished - started) * 1_000))
+
+
+def _preserve_collector_failures(investigation: Investigation, snapshot: Snapshot) -> Investigation:
+    failure_missing = tuple(
+        f"Collector {failure.collector} failed ({failure.code}): {failure.detail}"
+        for failure in snapshot.failures
+    )
+    missing = investigation.missing + tuple(
+        item for item in failure_missing if item not in investigation.missing
+    )
+    return replace(investigation, missing=missing)
+
+
+def _unknown_alarm_investigation(snapshot: Snapshot) -> Investigation:
+    return Investigation(
+        facts=(),
+        directions=(),
+        missing=("Alarm is not mapped to a PILO service in the protected topology.",),
+        classification="unclassified",
+        tool_calls=(),
+        classification_evidence_ids=(),
+    )

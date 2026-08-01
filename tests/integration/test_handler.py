@@ -13,6 +13,7 @@ from pilo_incident_investigator.agent.contracts import AgentProposal
 from pilo_incident_investigator.config import RuntimeConfig
 from pilo_incident_investigator.domain import (
     AlarmEvent,
+    CollectorFailure,
     Evidence,
     Investigation,
     JsonValue,
@@ -21,8 +22,16 @@ from pilo_incident_investigator.domain import (
     ToolResult,
 )
 from pilo_incident_investigator.event import incident_id_for
-from pilo_incident_investigator.handler import Runtime, S3TopologyProvider, TopologyLoadError
-from pilo_incident_investigator.publishers import Publisher
+from pilo_incident_investigator.handler import (
+    IncidentBusyError,
+    RetryablePublicationError,
+    Runtime,
+    S3TopologyProvider,
+    TopologyLoadError,
+)
+from pilo_incident_investigator.integrations.github import IntegrationError
+from pilo_incident_investigator.publishers import BundleStoreFailed, Publisher
+from pilo_incident_investigator.state import ClaimDisposition, EventClaim
 from pilo_incident_investigator.topology import Topology
 
 ROOT = Path(__file__).parents[2]
@@ -48,12 +57,12 @@ class FakeTopologyProvider:
 
 
 class FakeSnapshotCollector:
-    def __init__(self) -> None:
+    def __init__(self, *, failures: tuple[CollectorFailure, ...] = ()) -> None:
         self.calls = 0
+        self.failures = failures
 
     def collect(self, event: AlarmEvent, topology: Topology) -> Snapshot:
         self.calls += 1
-        assert topology.resolve_alarm(event.alarm_arn)
         incident_id = incident_id_for(event.event_id)
         return Snapshot(
             incident_id=incident_id,
@@ -66,7 +75,7 @@ class FakeSnapshotCollector:
                     data={"running": 0},
                 ),
             ),
-            failures=(),
+            failures=self.failures,
         )
 
 
@@ -117,17 +126,50 @@ class FakeHybridAgent:
 
 
 class FakeState:
-    def __init__(self, *, claimed: bool = True) -> None:
-        self.claimed = claimed
-        self.claims: list[tuple[str, str]] = []
+    def __init__(self, *, disposition: ClaimDisposition = ClaimDisposition.STARTED) -> None:
+        self.processing_status = {
+            ClaimDisposition.STARTED: "new",
+            ClaimDisposition.RESUMED: "retryable",
+            ClaimDisposition.BUSY: "processing",
+            ClaimDisposition.COMPLETE: "complete",
+        }[disposition]
+        self.claims: list[tuple[str, str, str]] = []
         self.snapshot_events: list[str] = []
         self.bundle_events: list[str] = []
         self.issue_events: list[str] = []
         self.slack_events: list[tuple[str, str]] = []
+        self.retryable_events: list[tuple[str, str]] = []
+        self.complete_events: list[tuple[str, str]] = []
+        self.current_attempt: str | None = None
 
-    def claim_event(self, event_id: str, incident_id: str) -> bool:
-        self.claims.append((event_id, incident_id))
-        return self.claimed
+    def begin_event(self, event_id: str, incident_id: str, attempt_id: str) -> EventClaim:
+        self.claims.append((event_id, incident_id, attempt_id))
+        if self.processing_status == "complete":
+            return EventClaim(ClaimDisposition.COMPLETE, None)
+        if self.processing_status == "processing":
+            return EventClaim(ClaimDisposition.BUSY, None)
+        disposition = (
+            ClaimDisposition.STARTED
+            if self.processing_status == "new"
+            else ClaimDisposition.RESUMED
+        )
+        self.processing_status = "processing"
+        self.current_attempt = attempt_id
+        return EventClaim(disposition, attempt_id)
+
+    def mark_retryable(self, event_id: str, attempt_id: str) -> bool:
+        self.retryable_events.append((event_id, attempt_id))
+        if self.processing_status != "processing" or self.current_attempt != attempt_id:
+            return False
+        self.processing_status = "retryable"
+        return True
+
+    def mark_complete(self, event_id: str, attempt_id: str) -> bool:
+        self.complete_events.append((event_id, attempt_id))
+        if self.processing_status != "processing" or self.current_attempt != attempt_id:
+            return False
+        self.processing_status = "complete"
+        return True
 
     def mark_snapshot_complete(self, event_id: str) -> bool:
         self.snapshot_events.append(event_id)
@@ -147,33 +189,47 @@ class FakeState:
 
 
 class FakeS3:
-    def __init__(self) -> None:
+    def __init__(self, *, failures: int = 0) -> None:
+        self.failures = failures
         self.keys: list[str] = []
         self.bodies: list[bytes] = []
 
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        if self.failures:
+            self.failures -= 1
+            raise OSError("synthetic S3 failure")
         self.keys.append(kwargs["Key"])
         self.bodies.append(kwargs["Body"])
         return {}
 
 
 class FakeGitHub:
-    def __init__(self) -> None:
+    def __init__(self, *, failures: int = 0) -> None:
+        self.failures = failures
         self.created_issue_count = 0
+        self.issue_url: str | None = None
 
     def find_issue_by_incident_id(self, repository: str, incident_id: str) -> str | None:
-        return None
+        if self.failures:
+            self.failures -= 1
+            raise IntegrationError("synthetic GitHub failure")
+        return self.issue_url
 
     def create_incident_issue(self, repository: str, incident_id: str, issue_markdown: str) -> str:
         self.created_issue_count += 1
-        return f"https://github.com/{repository}/issues/1"
+        self.issue_url = f"https://github.com/{repository}/issues/1"
+        return self.issue_url
 
 
 class FakeSlack:
-    def __init__(self) -> None:
+    def __init__(self, *, failures: int = 0) -> None:
+        self.failures = failures
         self.messages: list[str] = []
 
     def send_text(self, text: str) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise IntegrationError("synthetic Slack failure")
         self.messages.append(text)
 
 
@@ -190,15 +246,23 @@ class RuntimeFixture:
     snapshots: FakeSnapshotCollector
 
 
-def runtime_fixture(*, mode: str = "snapshot_only", claimed: bool = True) -> RuntimeFixture:
+def runtime_fixture(
+    *,
+    mode: str = "snapshot_only",
+    disposition: ClaimDisposition = ClaimDisposition.STARTED,
+    s3_failures: int = 0,
+    github_failures: int = 0,
+    slack_failures: int = 0,
+    collector_failures: tuple[CollectorFailure, ...] = (),
+) -> RuntimeFixture:
     planner = FakePlanner()
     hybrid_agent = FakeHybridAgent(fail_on_call=mode == "snapshot_only")
-    state = FakeState(claimed=claimed)
-    s3 = FakeS3()
-    github = FakeGitHub()
-    slack = FakeSlack()
+    state = FakeState(disposition=disposition)
+    s3 = FakeS3(failures=s3_failures)
+    github = FakeGitHub(failures=github_failures)
+    slack = FakeSlack(failures=slack_failures)
     topology = FakeTopologyProvider()
-    snapshots = FakeSnapshotCollector()
+    snapshots = FakeSnapshotCollector(failures=collector_failures)
     publisher = Publisher(
         bundle_bucket="pilo-incident-bundles",
         github_repository="synthetic-org/private-incidents",
@@ -216,6 +280,7 @@ def runtime_fixture(*, mode: str = "snapshot_only", claimed: bool = True) -> Run
         state=state,
         publisher=publisher,
         now=lambda: NOW,
+        attempt_id=lambda: "attempt-test",
     )
     return RuntimeFixture(
         runtime, planner, hybrid_agent, state, s3, github, slack, topology, snapshots
@@ -263,7 +328,7 @@ def test_hybrid_mode_uses_bounded_agent_instead_of_direct_summary() -> None:
 
 
 def test_duplicate_event_stops_before_snapshot_or_publication() -> None:
-    fixture = runtime_fixture(claimed=False)
+    fixture = runtime_fixture(disposition=ClaimDisposition.COMPLETE)
 
     response = fixture.runtime.handle(load_json("tests/fixtures/events/alarm.json"))
 
@@ -276,6 +341,97 @@ def test_duplicate_event_stops_before_snapshot_or_publication() -> None:
     assert fixture.s3.keys == []
     assert fixture.github.created_issue_count == 0
     assert fixture.slack.messages == []
+
+
+def test_in_progress_duplicate_raises_so_eventbridge_can_retry() -> None:
+    fixture = runtime_fixture(disposition=ClaimDisposition.BUSY)
+
+    with pytest.raises(IncidentBusyError):
+        fixture.runtime.handle(load_json("tests/fixtures/events/alarm.json"))
+
+    assert fixture.snapshots.calls == 0
+    assert fixture.s3.keys == []
+
+
+def test_s3_failure_marks_event_retryable_and_next_delivery_resumes() -> None:
+    fixture = runtime_fixture(s3_failures=1)
+    event = load_json("tests/fixtures/events/alarm.json")
+
+    with pytest.raises(BundleStoreFailed):
+        fixture.runtime.handle(event)
+    response = fixture.runtime.handle(event)
+
+    assert response["status"] == "published"
+    assert fixture.snapshots.calls == 2
+    assert len(fixture.s3.keys) == 1
+    assert fixture.state.retryable_events == [("evt-001", "attempt-test")]
+    assert fixture.state.complete_events == [("evt-001", "attempt-test")]
+
+
+def test_partial_collector_failure_is_always_preserved_as_missing_information() -> None:
+    fixture = runtime_fixture(
+        collector_failures=(CollectorFailure("logs", "timeout", "bounded log collection failed"),)
+    )
+
+    fixture.runtime.handle(load_json("tests/fixtures/events/alarm.json"))
+
+    bundle: object = json.loads(fixture.s3.bodies[0])
+    assert isinstance(bundle, dict)
+    investigation = bundle["investigation"]
+    assert isinstance(investigation, dict)
+    assert investigation["missing"] == [
+        "Collector logs failed (timeout): bounded log collection failed"
+    ]
+
+
+def test_unknown_alarm_skips_models_and_is_published_unclassified() -> None:
+    fixture = runtime_fixture(mode="hybrid_agent")
+    event = load_json("tests/fixtures/events/alarm.json")
+    event["resources"] = ["arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:unknown"]
+
+    response = fixture.runtime.handle(event)
+
+    assert response["status"] == "published"
+    assert fixture.hybrid_agent.calls == 0
+    assert fixture.planner.summarize_calls == 0
+    bundle: object = json.loads(fixture.s3.bodies[0])
+    assert isinstance(bundle, dict)
+    investigation = bundle["investigation"]
+    assert isinstance(investigation, dict)
+    assert investigation["classification"] == "unclassified"
+    assert investigation["classification_evidence_ids"] == []
+
+
+def test_degraded_github_delivery_is_retried_after_slack_handoff() -> None:
+    fixture = runtime_fixture(github_failures=1)
+    event = load_json("tests/fixtures/events/alarm.json")
+
+    with pytest.raises(RetryablePublicationError):
+        fixture.runtime.handle(event)
+    response = fixture.runtime.handle(event)
+
+    assert response["status"] == "published"
+    assert fixture.github.created_issue_count == 1
+    assert len(fixture.slack.messages) == 2
+    assert "degraded" in fixture.slack.messages[0]
+    assert fixture.state.processing_status == "complete"
+
+
+def test_failed_slack_delivery_retries_without_duplicate_issue() -> None:
+    fixture = runtime_fixture(slack_failures=1)
+    event = load_json("tests/fixtures/events/alarm.json")
+
+    with pytest.raises(RetryablePublicationError):
+        fixture.runtime.handle(event)
+    response = fixture.runtime.handle(event)
+
+    assert response["status"] == "published"
+    assert fixture.github.created_issue_count == 1
+    assert len(fixture.slack.messages) == 1
+    assert fixture.state.slack_events == [
+        ("evt-001", "failed"),
+        ("evt-001", "sent"),
+    ]
 
 
 class FakeTopologyBody:
