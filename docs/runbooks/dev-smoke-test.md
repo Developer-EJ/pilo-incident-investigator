@@ -18,7 +18,7 @@ composite alarm, PILO 애플리케이션 alarm 및 ECS·ALB·RDS·SQS·Secret �
 
 ## 1. 변경 없는 사전 점검과 공통 함수
 
-승인된 보호 실행 환경에는 PILO_DEV_ACCOUNT_ID, PILO_SYNTHETIC_ALARM_ARN, PILO_GITHUB_TOKEN_PARAMETER_ARN, PILO_SLACK_WEBHOOK_PARAMETER_ARN, PILO_INCIDENT_REPOSITORY, PILO_TOPOLOGY_FILE, PILO_TOPOLOGY_BUCKET, PILO_TOPOLOGY_KEY를 설정한다. 두 SSM input은 parameter ARN이며 token/webhook 값이나 parameter name input이 아니다.
+승인된 보호 실행 환경에는 PILO_DEV_ACCOUNT_ID, PILO_SYNTHETIC_ALARM_ARN, PILO_GITHUB_TOKEN_PARAMETER_ARN, PILO_SLACK_WEBHOOK_PARAMETER_ARN, PILO_BEDROCK_MODEL_ARN, PILO_INCIDENT_REPOSITORY, PILO_TOPOLOGY_FILE, PILO_TOPOLOGY_BUCKET, PILO_TOPOLOGY_KEY를 설정한다. 두 SSM input은 parameter ARN이며 token/webhook 값이나 parameter name input이 아니다. Bedrock input은 ap-northeast-2의 foundation model ARN 또는 승인된 dev account의 inference/application inference profile ARN이어야 한다.
 
 ~~~powershell
 Set-StrictMode -Version Latest
@@ -30,7 +30,7 @@ $SyntheticMetricName = "Trigger"
 
 foreach ($name in @(
   "PILO_DEV_ACCOUNT_ID", "PILO_SYNTHETIC_ALARM_ARN",
-  "PILO_GITHUB_TOKEN_PARAMETER_ARN", "PILO_SLACK_WEBHOOK_PARAMETER_ARN",
+  "PILO_GITHUB_TOKEN_PARAMETER_ARN", "PILO_SLACK_WEBHOOK_PARAMETER_ARN", "PILO_BEDROCK_MODEL_ARN",
   "PILO_INCIDENT_REPOSITORY", "PILO_TOPOLOGY_FILE", "PILO_TOPOLOGY_BUCKET", "PILO_TOPOLOGY_KEY"
 )) {
   $protectedValue = [Environment]::GetEnvironmentVariable($name)
@@ -39,6 +39,7 @@ foreach ($name in @(
 if ($env:PILO_DEV_ACCOUNT_ID -notmatch "^[0-9]{12}$") { throw "Approved dev account ID is invalid" }
 if ($env:PILO_SYNTHETIC_ALARM_ARN -notmatch "^arn:aws:cloudwatch:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):alarm:pilo-incident-investigator-dev-smoke$") { throw "Synthetic alarm ARN is outside the approved account, region, or name" }
 if ($env:PILO_GITHUB_TOKEN_PARAMETER_ARN -eq $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN) { throw "SSM parameter ARNs must be distinct" }
+if ($env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2::foundation-model/[^[:space:]*?]+$" -and $env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):(inference-profile|application-inference-profile)/[^[:space:]*?]+$") { throw "Bedrock model ARN is outside the approved account or region" }
 
 $region = $env:AWS_REGION
 if (-not $region) { $region = $env:AWS_DEFAULT_REGION }
@@ -97,15 +98,16 @@ function Assert-PrivateIncidentRepository {
   if ($visibility -ne "PRIVATE") { throw "Incident repository must be private" }
 }
 
-function Get-ApprovedSsmParameterName([string]$ParameterArn) {
-  $pattern = "^arn:aws:ssm:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):parameter/(pilo-incident-investigator/dev/(?:github-token|slack-webhook-url))$"
+function Get-ApprovedSsmParameterName([string]$ParameterArn, [string]$ExpectedName) {
+  $expectedPath = $ExpectedName.TrimStart("/")
+  $pattern = "^arn:aws:ssm:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):parameter/$([regex]::Escape($expectedPath))$"
   $match = [regex]::Match($ParameterArn, $pattern)
-  if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) { throw "SSM parameter ARN is outside the approved account or region" }
-  return "/$($match.Groups[1].Value)"
+  if (-not $match.Success) { throw "SSM parameter ARN is outside the approved account, region, or role" }
+  return $ExpectedName
 }
 
-function Assert-ApprovedSsmParameter([string]$ParameterArn) {
-  $parameterName = Get-ApprovedSsmParameterName $ParameterArn
+function Assert-ApprovedSsmParameter([string]$ParameterArn, [string]$ExpectedName) {
+  $parameterName = Get-ApprovedSsmParameterName $ParameterArn $ExpectedName
   $parameterType = Get-AwsText @("ssm", "describe-parameters", "--parameter-filters", "Key=Name,Option=Equals,Values=$parameterName", "--query", "Parameters[0].Type", "--output", "text", "--region", "ap-northeast-2") "SSM parameter metadata check failed"
   if ($parameterType -ne "SecureString") { throw "SSM parameter must be SecureString" }
 }
@@ -156,8 +158,8 @@ raise SystemExit(0 if topology.resolve_alarm(os.environ["PILO_SYNTHETIC_ALARM_AR
 }
 
 function Assert-RuntimeBinding {
-  Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN
-  Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN
+  Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN "/pilo-incident-investigator/dev/github-token"
+  Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN "/pilo-incident-investigator/dev/slack-webhook-url"
   Assert-ProtectedTopologyBinding
   $configuration = Get-AwsJson @("lambda", "get-function-configuration", "--function-name", $lambdaFunction, "--region", "ap-northeast-2", "--output", "json") "Lambda configuration check failed"
   $variables = $configuration.Environment.Variables
@@ -171,6 +173,7 @@ function Assert-RuntimeBinding {
     "PILO_GITHUB_REPOSITORY" = $env:PILO_INCIDENT_REPOSITORY
     "PILO_GITHUB_TOKEN_PARAMETER" = $env:PILO_GITHUB_TOKEN_PARAMETER_ARN
     "PILO_SLACK_WEBHOOK_PARAMETER" = $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN
+    "PILO_BEDROCK_MODEL_ID" = $env:PILO_BEDROCK_MODEL_ARN
     "PILO_MODE" = "snapshot_only"
   }
   foreach ($key in $expectedVariables.Keys) {
@@ -178,6 +181,7 @@ function Assert-RuntimeBinding {
   }
   Assert-PrivateIncidentRepository
   $rule = Get-AwsJson @("events", "describe-rule", "--name", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge rule inspection failed"
+  if ($rule.State -ne "ENABLED") { throw "EventBridge rule must be enabled" }
   try { $pattern = $rule.EventPattern | ConvertFrom-Json -ErrorAction Stop } catch { throw "EventBridge rule pattern is invalid" }
   Assert-ExactSingleton $pattern.source "aws.cloudwatch" "EventBridge source must be the synthetic CloudWatch route"
   Assert-ExactSingleton $pattern."detail-type" "CloudWatch Alarm State Change" "EventBridge detail type is invalid"
@@ -186,7 +190,41 @@ function Assert-RuntimeBinding {
   Assert-ExactSingleton $pattern.detail.state.value "ALARM" "EventBridge alarm state is invalid"
   $targets = Get-AwsJson @("events", "list-targets-by-rule", "--rule", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge target inspection failed"
   $targetItems = @($targets.Targets | Where-Object { $null -ne $_ })
-  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -ne $lambdaFunctionArn) { throw "EventBridge must have exactly one target bound to the Lambda" }
+  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -ne $lambdaFunctionArn -or $null -ne $targetItems[0].Input -or $null -ne $targetItems[0].InputPath -or $null -ne $targetItems[0].InputTransformer) { throw "EventBridge target must bind the unmodified event to exactly one Lambda" }
+}
+
+function Wait-ForPublishedIncident {
+  param([datetime]$StartedAt)
+  $deadline = [DateTime]::UtcNow.AddSeconds(360)
+  while ($true) {
+    $bundleList = Get-AwsJson @("s3api", "list-objects-v2", "--bucket", $bundleBucket, "--prefix", "incidents/", "--region", "ap-northeast-2", "--output", "json") "Bundle listing failed"
+    $recentBundles = @($bundleList.Contents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $StartedAt })
+    if ($recentBundles.Count -gt 1) { throw "More than one isolated synthetic Incident Bundle was found" }
+    if ($recentBundles.Count -eq 1) {
+      $bundleKey = [string]$recentBundles[0].Key
+      $bundleKeyMatch = [regex]::Match($bundleKey, '^incidents/(inc-[0-9a-f]{20})/bundle\.json$')
+      if (-not $bundleKeyMatch.Success) { throw "Incident Bundle key shape is invalid" }
+      $incidentId = $bundleKeyMatch.Groups[1].Value
+      $bundleHead = Get-AwsJson @("s3api", "head-object", "--bucket", $bundleBucket, "--key", $bundleKey, "--region", "ap-northeast-2", "--output", "json") "Incident Bundle metadata check failed"
+      if ($bundleHead.ServerSideEncryption -ne "AES256" -or [int64]$bundleHead.ContentLength -lt 1) { throw "Incident Bundle metadata is invalid" }
+      $dynamoValues = @{ ":incident_id" = @{ "S" = $incidentId } } | ConvertTo-Json -Compress
+      $stateResult = Get-AwsJson @("dynamodb", "scan", "--table-name", $stateTable, "--filter-expression", "incident_id = :incident_id", "--projection-expression", "incident_id, bundle_stored, issue_published, slack_status, processing_status", "--expression-attribute-values", $dynamoValues, "--region", "ap-northeast-2", "--output", "json") "DynamoDB incident state check failed"
+      $stateItems = @($stateResult.Items | Where-Object { $null -ne $_ })
+      if ($stateItems.Count -gt 1) { throw "More than one DynamoDB state item was found" }
+      if ($stateItems.Count -eq 1) {
+        $stateItem = $stateItems[0]
+        if ($stateItem.bundle_stored.BOOL -eq $true -and $stateItem.issue_published.BOOL -eq $true -and $stateItem.slack_status.S -eq "sent" -and $stateItem.processing_status.S -eq "complete") {
+          Assert-PrivateIncidentRepository
+          $issueProof = Get-GhJson @("issue", "list", "--repo", $env:PILO_INCIDENT_REPOSITORY, "--state", "all", "--search", "incident-id:$incidentId in:body", "--json", "number,body", "--jq", '{count: length, evidence: (length == 1 and (.[0].body | test("Evidence ID|evidence[-_ ]id|근거:"; "i")))}') "Private Incident Issue check failed"
+          if ($issueProof.count -gt 1) { throw "More than one private Incident Issue was found" }
+          if ($issueProof.count -eq 1 -and $issueProof.evidence -ne $true) { throw "Private Incident Issue lacks an Evidence ID citation" }
+          if ($issueProof.count -eq 1 -and $issueProof.evidence -eq $true) { return $incidentId }
+        }
+      }
+    }
+    if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out waiting for complete synthetic incident publication" }
+    Start-Sleep -Seconds 10
+  }
 }
 
 $pythonVersion = & python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
@@ -195,8 +233,8 @@ if ($pythonExitCode -ne 0 -or [string]::IsNullOrWhiteSpace([string]$pythonVersio
 
 Assert-ApprovedAccount
 Assert-PrivateIncidentRepository
-Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN
-Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN
+Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN "/pilo-incident-investigator/dev/github-token"
+Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN "/pilo-incident-investigator/dev/slack-webhook-url"
 Assert-ProtectedTopologyBinding
 $originalAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
 $originalState = $originalAlarm.StateValue
@@ -255,33 +293,7 @@ try {
   & aws cloudwatch set-alarm-state --alarm-name $SyntheticAlarmName --state-value ALARM --state-reason "synthetic smoke test" --region ap-northeast-2 1>$null 2>$null
   if ($LASTEXITCODE -ne 0) { throw "Synthetic alarm state change failed" }
 
-  # 같은 session의 isolated route 결과만 최대 360초 동안 10초 간격으로 metadata polling 한다.
-  $bundleDeadline = [DateTime]::UtcNow.AddSeconds(360)
-  while ($true) {
-    $bundleList = Get-AwsJson @("s3api", "list-objects-v2", "--bucket", $bundleBucket, "--prefix", "incidents/", "--region", "ap-northeast-2", "--output", "json") "Bundle listing failed"
-    $recentBundles = @($bundleList.Contents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $smokeStartedAt })
-    if ($recentBundles.Count -gt 1) { throw "More than one isolated synthetic Incident Bundle was found" }
-    if ($recentBundles.Count -eq 1) { break }
-    if ([DateTime]::UtcNow -ge $bundleDeadline) { throw "Timed out waiting for the isolated synthetic Incident Bundle" }
-    Start-Sleep -Seconds 10
-  }
-  $bundleKey = [string]$recentBundles[0].Key
-  $bundleKeyMatch = [regex]::Match($bundleKey, '^incidents/(inc-[0-9a-f]{20})/bundle\.json$')
-  if (-not $bundleKeyMatch.Success) { throw "Incident Bundle key shape is invalid" }
-  $incidentId = $bundleKeyMatch.Groups[1].Value
-  $bundleHead = Get-AwsJson @("s3api", "head-object", "--bucket", $bundleBucket, "--key", $bundleKey, "--region", "ap-northeast-2", "--output", "json") "Incident Bundle metadata check failed"
-  if ($bundleHead.ServerSideEncryption -ne "AES256" -or [int64]$bundleHead.ContentLength -lt 1) { throw "Incident Bundle metadata is invalid" }
-
-  $dynamoValues = @{ ":incident_id" = @{ "S" = $incidentId } } | ConvertTo-Json -Compress
-  $stateResult = Get-AwsJson @("dynamodb", "scan", "--table-name", $stateTable, "--filter-expression", "incident_id = :incident_id", "--projection-expression", "event_id, incident_id, bundle_stored, issue_published, slack_status, processing_status", "--expression-attribute-values", $dynamoValues, "--region", "ap-northeast-2", "--output", "json") "DynamoDB incident state check failed"
-  $stateItems = @($stateResult.Items | Where-Object { $null -ne $_ })
-  if ($stateItems.Count -ne 1) { throw "Expected exactly one DynamoDB state item" }
-  $stateItem = $stateItems[0]
-  if ($stateItem.incident_id.S -ne $incidentId -or $stateItem.bundle_stored.BOOL -ne $true -or $stateItem.issue_published.BOOL -ne $true -or $stateItem.slack_status.S -ne "sent" -or $stateItem.processing_status.S -ne "complete") { throw "DynamoDB incident state is incomplete" }
-
-  Assert-PrivateIncidentRepository
-  $issueProof = Get-GhJson @("issue", "list", "--repo", $env:PILO_INCIDENT_REPOSITORY, "--state", "all", "--search", "incident-id:$incidentId in:body", "--json", "number,body", "--jq", '{count: length, evidence: (length == 1 and (.[0].body | test("Evidence ID|evidence[-_ ]id|근거:"; "i")))}') "Private Incident Issue check failed"
-  if ($issueProof.count -ne 1 -or $issueProof.evidence -ne $true) { throw "Private Incident Issue is missing or lacks an Evidence ID citation" }
+  $incidentId = Wait-ForPublishedIncident $smokeStartedAt
   $slackConfirmation = Read-Host "After manually checking the test channel summary and private Issue link, enter CONFIRMED"
   if ($slackConfirmation -cne "CONFIRMED") { throw "Slack test-channel confirmation was not provided" }
 
