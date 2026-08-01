@@ -28,8 +28,11 @@ if ($env:PILO_GITHUB_TOKEN_PARAMETER -eq $env:PILO_SLACK_WEBHOOK_PARAMETER) { th
 
 $region = $env:AWS_REGION
 if (-not $region) { $region = $env:AWS_DEFAULT_REGION }
-if (-not $region) { $region = aws configure get region 2>$null }
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$region) -or ([string]$region).Trim() -ne "ap-northeast-2") { throw "AWS region must be ap-northeast-2" }
+if (-not $region) {
+  $region = aws configure get region 2>$null
+  if ($LASTEXITCODE -ne 0) { throw "AWS region lookup failed" }
+}
+if ([string]::IsNullOrWhiteSpace([string]$region) -or ([string]$region).Trim() -ne "ap-northeast-2") { throw "AWS region must be ap-northeast-2" }
 
 function Get-AwsText([string[]]$Arguments, [string]$FailureMessage) {
   $value = & aws @Arguments 2>$null
