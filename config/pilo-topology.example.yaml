@@ -8,6 +8,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-01]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-01/0000000000000001]
     rds_instances: [pilo-dev-db-01]
+    secrets: [pilo-dev-secret-01]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01]
     github_repository: synthetic-org/pilo-dev-service-01
   - key: pilo-dev-service-02
@@ -16,6 +17,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-02]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-02/0000000000000002]
     rds_instances: [pilo-dev-db-02]
+    secrets: [pilo-dev-secret-02]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-02]
     github_repository: synthetic-org/pilo-dev-service-02
   - key: pilo-dev-service-03
@@ -24,6 +26,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-03]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-03/0000000000000003]
     rds_instances: [pilo-dev-db-03]
+    secrets: [pilo-dev-secret-03]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-03]
     github_repository: synthetic-org/pilo-dev-service-03
   - key: pilo-dev-service-04
@@ -32,6 +35,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-04]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-04/0000000000000004]
     rds_instances: [pilo-dev-db-04]
+    secrets: [pilo-dev-secret-04]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-04]
     github_repository: synthetic-org/pilo-dev-service-04
   - key: pilo-dev-service-05
@@ -40,6 +44,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-05]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-05/0000000000000005]
     rds_instances: [pilo-dev-db-05]
+    secrets: [pilo-dev-secret-05]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-05]
     github_repository: synthetic-org/pilo-dev-service-05
   - key: pilo-dev-service-06
@@ -48,6 +53,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-06]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-06/0000000000000006]
     rds_instances: [pilo-dev-db-06]
+    secrets: [pilo-dev-secret-06]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-06]
     github_repository: synthetic-org/pilo-dev-service-06
   - key: pilo-dev-service-07
@@ -56,6 +62,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-07]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-07/0000000000000007]
     rds_instances: [pilo-dev-db-07]
+    secrets: [pilo-dev-secret-07]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-07]
     github_repository: synthetic-org/pilo-dev-service-07
   - key: pilo-dev-service-08
@@ -64,6 +71,7 @@ services:
     log_groups: [/aws/ecs/pilo-dev-service-08]
     target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-08/0000000000000008]
     rds_instances: [pilo-dev-db-08]
+    secrets: [pilo-dev-secret-08]
     queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-08]
     github_repository: synthetic-org/pilo-dev-service-08
 alarms:
