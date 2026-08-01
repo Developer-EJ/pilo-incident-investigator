@@ -1,4 +1,5 @@
 import json
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -86,6 +87,33 @@ def test_invalid_state_timestamp_is_rejected() -> None:
 
     with pytest.raises(EventValidationError, match="timestamp"):
         parse_alarm_event(event_payload)
+
+
+def test_validation_traceback_does_not_expose_invalid_timestamp() -> None:
+    sensitive_marker = "SENSITIVE-TIMESTAMP-MARKER"
+    event_payload = payload()
+    detail = cast(dict[str, JsonValue], event_payload["detail"])
+    state = cast(dict[str, JsonValue], detail["state"])
+    state["timestamp"] = sensitive_marker
+
+    with pytest.raises(EventValidationError) as captured:
+        parse_alarm_event(event_payload)
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert sensitive_marker not in rendered
+
+
+def test_validation_traceback_does_not_expose_invalid_detail_key() -> None:
+    sensitive_marker = "SENSITIVE-DETAIL-KEY"
+    event_payload = payload()
+    detail = cast(dict[str, JsonValue], event_payload["detail"])
+    detail[sensitive_marker] = cast(JsonValue, object())
+
+    with pytest.raises(EventValidationError) as captured:
+        parse_alarm_event(event_payload)
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert sensitive_marker not in rendered
 
 
 def test_multiple_alarm_resources_are_rejected() -> None:

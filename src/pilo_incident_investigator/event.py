@@ -33,8 +33,8 @@ def parse_alarm_event(payload: dict[str, JsonValue]) -> AlarmEvent:
         event_id = _require_string(payload["id"])
         resources = payload["resources"]
         detail = payload["detail"]
-    except (KeyError, TypeError) as error:
-        raise EventValidationError("invalid alarm event") from error
+    except (KeyError, TypeError):
+        raise EventValidationError("invalid alarm event") from None
 
     if not isinstance(resources, list) or len(resources) != 1:
         raise EventValidationError("event must contain exactly one alarm resource")
@@ -47,8 +47,8 @@ def parse_alarm_event(payload: dict[str, JsonValue]) -> AlarmEvent:
     try:
         alarm_name = _require_string(detail["alarmName"])
         state = detail["state"]
-    except (KeyError, TypeError) as error:
-        raise EventValidationError("invalid alarm event") from error
+    except (KeyError, TypeError):
+        raise EventValidationError("invalid alarm event") from None
     if not isinstance(state, dict):
         raise EventValidationError("invalid alarm event")
     if state.get("value") != "ALARM":
@@ -63,8 +63,8 @@ def parse_alarm_event(payload: dict[str, JsonValue]) -> AlarmEvent:
             state_timestamp=timestamp,
             detail=dict(detail),
         )
-    except (TypeError, ValueError) as error:
-        raise EventValidationError("invalid alarm event") from error
+    except (TypeError, ValueError):
+        raise EventValidationError("invalid alarm event") from None
 
 
 def _require_string(value: JsonValue) -> str:
@@ -78,8 +78,8 @@ def _parse_timestamp(value: JsonValue | None) -> datetime:
         raise EventValidationError("invalid state timestamp")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise EventValidationError("invalid state timestamp") from error
+    except ValueError:
+        raise EventValidationError("invalid state timestamp") from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise EventValidationError("state timestamp must include a timezone")
     return parsed
