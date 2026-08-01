@@ -98,10 +98,10 @@ function Assert-PrivateIncidentRepository {
 }
 
 function Get-ApprovedSsmParameterName([string]$ParameterArn) {
-  $pattern = "^arn:aws:ssm:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):parameter/([A-Za-z0-9_.\-/]+)$"
+  $pattern = "^arn:aws:ssm:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):parameter/(pilo-incident-investigator/dev/(?:github-token|slack-webhook-url))$"
   $match = [regex]::Match($ParameterArn, $pattern)
   if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) { throw "SSM parameter ARN is outside the approved account or region" }
-  return $match.Groups[1].Value
+  return "/$($match.Groups[1].Value)"
 }
 
 function Assert-ApprovedSsmParameter([string]$ParameterArn) {
@@ -137,7 +137,28 @@ function Get-ApprovedSyntheticMetricAlarm {
   return $alarm
 }
 
+function Assert-ProtectedTopologyBinding {
+  & python -m pilo_incident_investigator.topology validate $env:PILO_TOPOLOGY_FILE *> $null
+  if ($LASTEXITCODE -ne 0) { throw "Protected topology validation failed" }
+  $topologyMappingCheck = @'
+import os
+from pathlib import Path
+from pilo_incident_investigator.topology import Topology
+topology = Topology.load(Path(os.environ["PILO_TOPOLOGY_FILE"]).read_text(encoding="utf-8"))
+raise SystemExit(0 if topology.resolve_alarm(os.environ["PILO_SYNTHETIC_ALARM_ARN"]) else 1)
+'@
+  & python -c $topologyMappingCheck *> $null
+  if ($LASTEXITCODE -ne 0) { throw "Protected topology does not map the synthetic alarm" }
+  $topologyHead = Get-AwsJson @("s3api", "head-object", "--bucket", $env:PILO_TOPOLOGY_BUCKET, "--key", $env:PILO_TOPOLOGY_KEY, "--checksum-mode", "ENABLED", "--region", "ap-northeast-2", "--output", "json") "Protected topology metadata check failed"
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try { $localTopologyChecksum = [Convert]::ToBase64String($sha256.ComputeHash([IO.File]::ReadAllBytes($env:PILO_TOPOLOGY_FILE))) } finally { $sha256.Dispose() }
+  if ($topologyHead.ServerSideEncryption -ne "AES256" -or [int64]$topologyHead.ContentLength -lt 1 -or [string]::IsNullOrWhiteSpace($topologyHead.ChecksumSHA256) -or $topologyHead.ChecksumSHA256 -ne $localTopologyChecksum) { throw "Protected topology object does not match the validated local input" }
+}
+
 function Assert-RuntimeBinding {
+  Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN
+  Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN
+  Assert-ProtectedTopologyBinding
   $configuration = Get-AwsJson @("lambda", "get-function-configuration", "--function-name", $lambdaFunction, "--region", "ap-northeast-2", "--output", "json") "Lambda configuration check failed"
   $variables = $configuration.Environment.Variables
   if ($null -eq $variables -or $configuration.FunctionArn -ne $lambdaFunctionArn) { throw "Lambda configuration is invalid" }
@@ -171,26 +192,12 @@ function Assert-RuntimeBinding {
 $pythonVersion = & python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
 $pythonExitCode = $LASTEXITCODE
 if ($pythonExitCode -ne 0 -or [string]::IsNullOrWhiteSpace([string]$pythonVersion) -or ([string]$pythonVersion).Trim() -ne "3.12") { throw "Python 3.12 is required" }
-& python -m pilo_incident_investigator.topology validate $env:PILO_TOPOLOGY_FILE *> $null
-if ($LASTEXITCODE -ne 0) { throw "Protected topology validation failed" }
-$topologyMappingCheck = @'
-import os
-from pathlib import Path
-from pilo_incident_investigator.topology import Topology
-topology = Topology.load(Path(os.environ["PILO_TOPOLOGY_FILE"]).read_text(encoding="utf-8"))
-raise SystemExit(0 if topology.resolve_alarm(os.environ["PILO_SYNTHETIC_ALARM_ARN"]) else 1)
-'@
-& python -c $topologyMappingCheck *> $null
-if ($LASTEXITCODE -ne 0) { throw "Protected topology does not map the synthetic alarm" }
 
 Assert-ApprovedAccount
 Assert-PrivateIncidentRepository
 Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN
 Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN
-$topologyHead = Get-AwsJson @("s3api", "head-object", "--bucket", $env:PILO_TOPOLOGY_BUCKET, "--key", $env:PILO_TOPOLOGY_KEY, "--checksum-mode", "ENABLED", "--region", "ap-northeast-2", "--output", "json") "Protected topology metadata check failed"
-$sha256 = [Security.Cryptography.SHA256]::Create()
-try { $localTopologyChecksum = [Convert]::ToBase64String($sha256.ComputeHash([IO.File]::ReadAllBytes($env:PILO_TOPOLOGY_FILE))) } finally { $sha256.Dispose() }
-if ($topologyHead.ServerSideEncryption -ne "AES256" -or [int64]$topologyHead.ContentLength -lt 1 -or [string]::IsNullOrWhiteSpace($topologyHead.ChecksumSHA256) -or $topologyHead.ChecksumSHA256 -ne $localTopologyChecksum) { throw "Protected topology object does not match the validated local input" }
+Assert-ProtectedTopologyBinding
 $originalAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
 $originalState = $originalAlarm.StateValue
 ~~~
@@ -248,10 +255,16 @@ try {
   & aws cloudwatch set-alarm-state --alarm-name $SyntheticAlarmName --state-value ALARM --state-reason "synthetic smoke test" --region ap-northeast-2 1>$null 2>$null
   if ($LASTEXITCODE -ne 0) { throw "Synthetic alarm state change failed" }
 
-  # 보호된 운영 절차의 완료 대기 후, 같은 session의 isolated route 결과만 metadata로 확인한다.
-  $bundleList = Get-AwsJson @("s3api", "list-objects-v2", "--bucket", $bundleBucket, "--prefix", "incidents/", "--region", "ap-northeast-2", "--output", "json") "Bundle listing failed"
-  $recentBundles = @($bundleList.Contents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $smokeStartedAt })
-  if ($recentBundles.Count -ne 1) { throw "Expected exactly one isolated synthetic Incident Bundle" }
+  # 같은 session의 isolated route 결과만 최대 360초 동안 10초 간격으로 metadata polling 한다.
+  $bundleDeadline = [DateTime]::UtcNow.AddSeconds(360)
+  while ($true) {
+    $bundleList = Get-AwsJson @("s3api", "list-objects-v2", "--bucket", $bundleBucket, "--prefix", "incidents/", "--region", "ap-northeast-2", "--output", "json") "Bundle listing failed"
+    $recentBundles = @($bundleList.Contents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $smokeStartedAt })
+    if ($recentBundles.Count -gt 1) { throw "More than one isolated synthetic Incident Bundle was found" }
+    if ($recentBundles.Count -eq 1) { break }
+    if ([DateTime]::UtcNow -ge $bundleDeadline) { throw "Timed out waiting for the isolated synthetic Incident Bundle" }
+    Start-Sleep -Seconds 10
+  }
   $bundleKey = [string]$recentBundles[0].Key
   $bundleKeyMatch = [regex]::Match($bundleKey, '^incidents/(inc-[0-9a-f]{20})/bundle\.json$')
   if (-not $bundleKeyMatch.Success) { throw "Incident Bundle key shape is invalid" }
@@ -269,6 +282,8 @@ try {
   Assert-PrivateIncidentRepository
   $issueProof = Get-GhJson @("issue", "list", "--repo", $env:PILO_INCIDENT_REPOSITORY, "--state", "all", "--search", "incident-id:$incidentId in:body", "--json", "number,body", "--jq", '{count: length, evidence: (length == 1 and (.[0].body | test("Evidence ID|evidence[-_ ]id|근거:"; "i")))}') "Private Incident Issue check failed"
   if ($issueProof.count -ne 1 -or $issueProof.evidence -ne $true) { throw "Private Incident Issue is missing or lacks an Evidence ID citation" }
+  $slackConfirmation = Read-Host "After manually checking the test channel summary and private Issue link, enter CONFIRMED"
+  if ($slackConfirmation -cne "CONFIRMED") { throw "Slack test-channel confirmation was not provided" }
 
   $logStartMilliseconds = ([DateTimeOffset]$smokeStartedAt).ToUnixTimeMilliseconds()
   $lambdaLogGroup = "/aws/lambda/$lambdaFunction"

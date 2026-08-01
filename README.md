@@ -68,30 +68,8 @@ workflow 권한은 `contents: read`뿐이며 AWS write credential을 요구하�
 
 ## 보호된 dev 배포 준비
 
-실제 배포는 별도 보호 환경의 명시적 승인 후에만 수행합니다. 로컬 또는 PR CI의 성공은 배포 승인이 아닙니다. 배포 전 다음 항목을 값 본문을 출력하지 않는 방식으로 확인합니다.
+실제 apply와 smoke는 로컬 검증 또는 PR CI의 성공과 무관하게 별도 보호 환경의 명시적 승인을 받아야 합니다. authoritative 절차는 [보호된 dev synthetic smoke runbook](docs/runbooks/dev-smoke-test.md)입니다.
 
-```powershell
-$region = $env:AWS_REGION
-if (-not $region) { $region = $env:AWS_DEFAULT_REGION }
-if (-not $region) { $region = aws configure get region }
-if (-not $region -or $region.Trim() -ne "ap-northeast-2") { throw "AWS region must be ap-northeast-2" }
-if (-not $env:PILO_GITHUB_TOKEN_PARAMETER -or -not $env:PILO_SLACK_WEBHOOK_PARAMETER) { throw "SSM parameter names are required" }
-if ($env:PILO_GITHUB_TOKEN_PARAMETER -eq $env:PILO_SLACK_WEBHOOK_PARAMETER) { throw "SSM parameters must be distinct" }
-
-aws sts get-caller-identity --query Account --output text --region ap-northeast-2
-$githubType = aws ssm describe-parameters --parameter-filters "Key=Name,Option=Equals,Values=$env:PILO_GITHUB_TOKEN_PARAMETER" --query "Parameters[0].Type" --output text --region ap-northeast-2
-if ($LASTEXITCODE -ne 0 -or $githubType.Trim() -ne "SecureString") { throw "GitHub token parameter must exist as SecureString" }
-$slackType = aws ssm describe-parameters --parameter-filters "Key=Name,Option=Equals,Values=$env:PILO_SLACK_WEBHOOK_PARAMETER" --query "Parameters[0].Type" --output text --region ap-northeast-2
-if ($LASTEXITCODE -ne 0 -or $slackType.Trim() -ne "SecureString") { throw "Slack Webhook parameter must exist as SecureString" }
-python -m pilo_incident_investigator.topology validate $env:PILO_TOPOLOGY_FILE
-aws s3api head-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --query "{Encryption:ServerSideEncryption,Length:ContentLength}" --region ap-northeast-2
-gh repo view $env:PILO_INCIDENT_REPOSITORY --json nameWithOwner,visibility
-```
-
-- 두 SSM parameter는 미리 승인된 별개의 SecureString이어야 하며 Terraform으로 값이나 parameter를 만들지 않습니다.
-- topology는 공개 저장소 밖의 보호 파일이어야 하며 검증 명령은 본문을 출력하지 않습니다.
-- incident 저장소는 private이어야 합니다.
-- 실제 식별자와 `*.tfvars`는 커밋하지 않습니다.
-- 저장된 Terraform plan을 사람이 검토해 Lambda, EventBridge, private S3, DynamoDB, IAM, 전용 log group 외 리소스 변경이 없음을 확인하기 전에는 apply하지 않습니다.
-
-실제 apply와 합성 Alarm smoke test는 별도의 보호 환경 작업에서 수행합니다. 현재 protected smoke는 완료 선언이 아닌 승인 게이트 뒤의 절차이며, 전용 synthetic metric alarm만 사용하는 상세 순서는 [`docs/runbooks/dev-smoke-test.md`](docs/runbooks/dev-smoke-test.md)를 따릅니다.
+- 승인된 account/region의 두 SSM SecureString parameter ARN, private incident repository, protected local topology와 해당 S3 object checksum을 fail-closed로 확인합니다.
+- 전용 synthetic metric alarm만 EventBridge rule에 singleton으로 route하고, 실제 PILO application alarm route는 smoke 뒤 별도 승인된 plan/apply로 전환합니다.
+- topology·credential 값, 실제 식별자, plan 결과, Bundle·Issue·Slack payload를 Git에 기록하지 않습니다.
