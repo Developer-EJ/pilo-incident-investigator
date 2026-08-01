@@ -16,6 +16,24 @@ class TopologyDenied(PermissionError):
     """Raised when a resource is outside the topology allowlist."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate keys at every mapping level."""
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                duplicate = key in mapping
+            except TypeError as error:
+                raise TopologyError("YAML mapping key must be hashable") from error
+            if duplicate:
+                raise TopologyError(f"duplicate YAML key: {key}")
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceTopology:
     key: str
@@ -39,7 +57,7 @@ class Topology:
     @classmethod
     def load(cls, text: str) -> "Topology":
         try:
-            raw = yaml.safe_load(text)
+            raw = yaml.load(text, Loader=_UniqueKeyLoader)
         except yaml.YAMLError as error:
             raise TopologyError("invalid YAML") from error
         if not isinstance(raw, dict):
@@ -162,6 +180,8 @@ def _reject_duplicate_service_resources(services: tuple[ServiceTopology, ...]) -
         "ecs_service": [service.ecs_service for service in services],
         "log_group": [item for service in services for item in service.log_groups],
         "target_group": [item for service in services for item in service.target_groups],
+        "rds_instance": [item for service in services for item in service.rds_instances],
+        "queue": [item for service in services for item in service.queues],
         "github_repository": [service.github_repository for service in services],
     }
     for resource_type, resources in resource_groups.items():

@@ -90,6 +90,45 @@ def test_duplicate_service_resources_are_rejected() -> None:
         Topology.load(text)
 
 
+@pytest.mark.parametrize("field", ["rds_instances", "queues"])
+def test_duplicate_rds_and_queue_resources_are_rejected(field: str) -> None:
+    raw = yaml.safe_load((FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8"))
+    raw["services"][1][field] = raw["services"][0][field]
+
+    with pytest.raises(TopologyError, match="duplicate resource"):
+        Topology.load(yaml.safe_dump(raw))
+
+
+def test_duplicate_top_level_yaml_key_is_rejected() -> None:
+    text = (FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8")
+
+    with pytest.raises(TopologyError, match="duplicate YAML key"):
+        Topology.load(f"{text}\nregion: ap-northeast-2\n")
+
+
+def test_duplicate_service_yaml_key_is_rejected() -> None:
+    text = (FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8")
+    duplicated = text.replace(
+        "  - key: pilo-dev-service-01\n",
+        "  - key: pilo-dev-service-01\n    key: pilo-dev-service-01\n",
+        1,
+    )
+
+    with pytest.raises(TopologyError, match="duplicate YAML key"):
+        Topology.load(duplicated)
+
+
+def test_duplicate_alarm_yaml_key_is_rejected() -> None:
+    text = (FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8")
+    alarm = (
+        "  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:"
+        "pilo-dev-service-01: [pilo-dev-service-01]\n"
+    )
+
+    with pytest.raises(TopologyError, match="duplicate YAML key"):
+        Topology.load(text.replace("alarms:\n", f"alarms:\n{alarm}", 1))
+
+
 def test_alarm_mapping_to_unknown_service_is_rejected() -> None:
     text = (FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8")
 
