@@ -2,7 +2,6 @@ data "aws_caller_identity" "current" {}
 
 locals {
   function_name                  = "${var.project_name}-dev"
-  topology_bucket                = trimprefix(var.topology_bucket_arn, "arn:aws:s3:::")
   bundle_bucket_name             = "${var.project_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
   event_rule_name                = "${var.project_name}-alarm-dev"
   state_table_name               = "${var.project_name}-state-dev"
@@ -99,7 +98,7 @@ resource "aws_lambda_function" "investigator" {
   environment {
     variables = {
       PILO_REGION                  = var.aws_region
-      PILO_TOPOLOGY_BUCKET         = local.topology_bucket
+      PILO_TOPOLOGY_BUCKET         = local.bundle_bucket_name
       PILO_TOPOLOGY_KEY            = var.topology_object_key
       PILO_STATE_TABLE             = aws_dynamodb_table.state.name
       PILO_BUNDLE_BUCKET           = aws_s3_bucket.bundle.id
@@ -111,7 +110,8 @@ resource "aws_lambda_function" "investigator" {
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.lambda]
+  # The route must be created or updated to DISABLED before any Lambda binding change.
+  depends_on = [aws_cloudwatch_log_group.lambda, aws_cloudwatch_event_rule.alarm]
 
   lifecycle {
     precondition {
@@ -124,6 +124,7 @@ resource "aws_lambda_function" "investigator" {
 resource "aws_cloudwatch_event_rule" "alarm" {
   name        = local.event_rule_name
   description = "Route existing PILO dev Alarm state changes to the investigator"
+  state       = var.event_route_enabled ? "ENABLED" : "DISABLED"
 
   event_pattern = jsonencode({
     source      = ["aws.cloudwatch"]
