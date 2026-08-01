@@ -8,8 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
 
-from pilo_incident_investigator.integrations.github import IntegrationError
-from pilo_incident_investigator.redaction import Redactor
+from pilo_incident_investigator.integrations.github import (
+    IntegrationError,
+    validate_incident_id,
+    validate_repository,
+)
+from pilo_incident_investigator.redaction import Redactor, is_safe_structural_id
 
 MAX_BUNDLE_BYTES = 1_000_000
 MAX_ISSUE_MARKDOWN_CHARS = 65_000
@@ -20,7 +24,6 @@ SLACK_TIMEOUT_SECONDS = 5.0
 
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _BUCKET_PATTERN = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
-_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 _SLACK_WEBHOOK_PATTERN = re.compile(
     r"https://hooks\.slack\.com/services/[A-Za-z0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+"
 )
@@ -30,6 +33,10 @@ class BundleStoreFailed(RuntimeError):
     """Sanitized failure to durably store the canonical Incident Bundle."""
 
 
+class PublisherStateFailed(RuntimeError):
+    """Sanitized failure to durably record a publisher outcome."""
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class PublicationPayload:
     event_id: str
@@ -37,6 +44,9 @@ class PublicationPayload:
     bundle_bytes: bytes
     issue_markdown: str
     slack_summary: str
+
+    def __post_init__(self) -> None:
+        _validate_publication(self)
 
     def __repr__(self) -> str:
         return "PublicationPayload(redacted=True)"
@@ -70,7 +80,7 @@ class PublisherState(Protocol):
 
     def mark_issue_published(self, event_id: str) -> bool: ...
 
-    def mark_slack_attempted(self, event_id: str) -> bool: ...
+    def mark_slack_attempted(self, event_id: str, status: str) -> bool: ...
 
 
 class HttpResponseLike(Protocol):
@@ -126,6 +136,7 @@ class SlackWebhookClient:
     def send_text(self, text: str) -> None:
         if not isinstance(text, str) or not text:
             raise ValueError("Slack text must be a non-empty string")
+        _require_safe_text(text)
         body = json.dumps({"text": text}, ensure_ascii=False, separators=(",", ":")).encode()
         if len(body) > MAX_SLACK_MESSAGE_BYTES:
             raise ValueError("Slack message exceeds the bounded payload size")
@@ -165,8 +176,7 @@ class Publisher:
     ) -> None:
         if _BUCKET_PATTERN.fullmatch(bundle_bucket) is None:
             raise ValueError("bundle bucket must be a valid bucket name")
-        if _REPOSITORY_PATTERN.fullmatch(github_repository) is None:
-            raise ValueError("GitHub repository must be an owner/name pair")
+        validate_repository(github_repository)
         self._bundle_bucket = bundle_bucket
         self._github_repository = github_repository
         self._s3 = s3
@@ -190,9 +200,10 @@ class Publisher:
         except Exception:
             raise BundleStoreFailed("Incident Bundle storage failed") from None
 
-        # The monotonic checkpoint result is deliberately not interpreted as
-        # a fresh success signal; the completed S3 write above is that signal.
-        self._state.mark_bundle_stored(publication.event_id)
+        # Independent outcome writes return True on retries even when the
+        # compatibility checkpoint rank is already ahead; False is unclaimed.
+        if not self._state.mark_bundle_stored(publication.event_id):
+            raise PublisherStateFailed("publisher state was not claimed")
 
         issue_url: str | None
         try:
@@ -208,7 +219,8 @@ class Publisher:
         except IntegrationError:
             issue_url = None
         else:
-            self._state.mark_issue_published(publication.event_id)
+            if not self._state.mark_issue_published(publication.event_id):
+                raise PublisherStateFailed("publisher state was not claimed")
 
         if issue_url is None:
             slack_text = f"{publication.incident_id} — degraded: issue publication failed"
@@ -221,7 +233,8 @@ class Publisher:
             slack_status = "failed"
         else:
             slack_status = "sent"
-        self._state.mark_slack_attempted(publication.event_id)
+        if not self._state.mark_slack_attempted(publication.event_id, slack_status):
+            raise PublisherStateFailed("publisher state was not claimed")
 
         return PublishResult(
             bundle_uri=bundle_uri,
@@ -233,14 +246,16 @@ class Publisher:
 def _validate_publication(publication: PublicationPayload) -> None:
     if not isinstance(publication, PublicationPayload):
         raise TypeError("publication must be a PublicationPayload")
-    if _IDENTIFIER_PATTERN.fullmatch(publication.event_id) is None:
+    if _IDENTIFIER_PATTERN.fullmatch(publication.event_id) is None or not is_safe_structural_id(
+        publication.event_id
+    ):
         raise ValueError("event ID is invalid")
-    if _IDENTIFIER_PATTERN.fullmatch(publication.incident_id) is None:
-        raise ValueError("incident ID is invalid")
+    validate_incident_id(publication.incident_id)
     if not isinstance(publication.bundle_bytes, bytes) or not (
         1 <= len(publication.bundle_bytes) <= MAX_BUNDLE_BYTES
     ):
         raise ValueError("Bundle bytes must be non-empty and bounded")
+    _validate_canonical_bundle_bytes(publication.bundle_bytes)
     if not isinstance(publication.issue_markdown, str) or not (
         1 <= len(publication.issue_markdown) <= MAX_ISSUE_MARKDOWN_CHARS
     ):
@@ -251,6 +266,30 @@ def _validate_publication(publication: PublicationPayload) -> None:
         raise ValueError("Slack summary must be non-empty and bounded")
     redactor = Redactor()
     for value in (publication.issue_markdown, publication.slack_summary):
-        redacted, report = redactor.redact_text(value)
-        if report.replacements or redacted != value:
-            raise ValueError("publishable text contains a credential shape")
+        _require_safe_text(value, redactor=redactor)
+
+
+def _validate_canonical_bundle_bytes(bundle_bytes: bytes) -> None:
+    try:
+        text = bundle_bytes.decode("utf-8")
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise TypeError
+        canonical = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError):
+        raise ValueError("Bundle bytes must be canonical UTF-8 JSON") from None
+    if canonical != bundle_bytes:
+        raise ValueError("Bundle bytes must be canonical UTF-8 JSON")
+    _require_safe_text(text)
+
+
+def _require_safe_text(value: str, *, redactor: Redactor | None = None) -> None:
+    actual_redactor = redactor or Redactor()
+    redacted, report = actual_redactor.redact_text(value)
+    if report.replacements or redacted != value:
+        raise ValueError("publishable text contains a credential shape")

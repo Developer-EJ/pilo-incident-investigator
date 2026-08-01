@@ -12,6 +12,8 @@ from pilo_incident_investigator.integrations.github import (
     IntegrationError,
 )
 
+INCIDENT_ID = "inc-0123456789abcdefabcd"
+
 
 class RecordingTransport:
     def __init__(self, response: HttpResponse) -> None:
@@ -237,7 +239,7 @@ def test_find_issue_searches_open_and_closed_and_verifies_exact_marker_line() ->
                 "incomplete_results": False,
                 "items": [
                     {
-                        "body": "prefix <!-- incident-id:inc-123 --> suffix",
+                        "body": f"prefix <!-- incident-id:{INCIDENT_ID} --> suffix",
                         "html_url": "https://github.com/synthetic-org/incidents/issues/3",
                     }
                 ],
@@ -252,7 +254,7 @@ def test_find_issue_searches_open_and_closed_and_verifies_exact_marker_line() ->
                 "incomplete_results": False,
                 "items": [
                     {
-                        "body": "<!-- incident-id:inc-123 -->\n## Incident Brief",
+                        "body": f"<!-- incident-id:{INCIDENT_ID} -->\n## Incident Brief",
                         "html_url": "https://github.com/synthetic-org/incidents/issues/4",
                     }
                 ],
@@ -262,7 +264,7 @@ def test_find_issue_searches_open_and_closed_and_verifies_exact_marker_line() ->
     transport = SequencedTransport([open_response, closed_response])
     client = GitHubClient("synthetic-token", transport=transport)
 
-    issue_url = client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123")
+    issue_url = client.find_issue_by_incident_id("synthetic-org/incidents", INCIDENT_ID)
 
     assert issue_url == "https://github.com/synthetic-org/incidents/issues/4"
     assert len(transport.calls) == 2
@@ -274,7 +276,7 @@ def test_find_issue_searches_open_and_closed_and_verifies_exact_marker_line() ->
         assert query["per_page"] == ["100"]
         assert "repo:synthetic-org/incidents" in query["q"][0]
         assert "is:issue" in query["q"][0]
-        assert '"incident-id:inc-123" in:body' in query["q"][0]
+        assert f'"incident-id:{INCIDENT_ID}" in:body' in query["q"][0]
         states.append("open" if "state:open" in query["q"][0] else "closed")
         assert body is None
         assert timeout == 5.0
@@ -290,7 +292,7 @@ def test_find_issue_returns_none_when_search_only_has_loose_substring() -> None:
                 "incomplete_results": False,
                 "items": [
                     {
-                        "body": "prefix <!-- incident-id:inc-123 --> suffix",
+                        "body": f"prefix <!-- incident-id:{INCIDENT_ID} --> suffix",
                         "html_url": "https://github.com/synthetic-org/incidents/issues/3",
                     }
                 ],
@@ -299,7 +301,7 @@ def test_find_issue_returns_none_when_search_only_has_loose_substring() -> None:
     )
     client = GitHubClient("synthetic-token", transport=SequencedTransport([response, response]))
 
-    assert client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123") is None
+    assert client.find_issue_by_incident_id("synthetic-org/incidents", INCIDENT_ID) is None
 
 
 def test_create_incident_issue_prefixes_exact_marker_and_returns_validated_url() -> None:
@@ -316,7 +318,7 @@ def test_create_incident_issue_prefixes_exact_marker_and_returns_validated_url()
     client = GitHubClient("synthetic-token", transport=transport)
 
     issue_url = client.create_incident_issue(
-        "synthetic-org/incidents", "inc-123", "## Incident Brief\n\nSafe."
+        "synthetic-org/incidents", INCIDENT_ID, "## Incident Brief\n\nSafe."
     )
 
     assert issue_url == "https://github.com/synthetic-org/incidents/issues/7"
@@ -325,13 +327,16 @@ def test_create_incident_issue_prefixes_exact_marker_and_returns_validated_url()
     assert url == "https://api.github.com/repos/synthetic-org/incidents/issues"
     assert headers["Authorization"] == "Bearer synthetic-token"
     assert json.loads(body or b"") == {
-        "title": "Incident inc-123",
-        "body": "<!-- incident-id:inc-123 -->\n## Incident Brief\n\nSafe.",
+        "title": f"Incident {INCIDENT_ID}",
+        "body": f"<!-- incident-id:{INCIDENT_ID} -->\n## Incident Brief\n\nSafe.",
     }
     assert timeout == 5.0
 
 
-@pytest.mark.parametrize("incident_id", ["", "../escape", "inc/123", "inc-123\n-->"])
+@pytest.mark.parametrize(
+    "incident_id",
+    ["", "inc-123", "../escape", "inc/123", "inc-123\n-->", "inc-0123456789ABCDEFABCD"],
+)
 def test_incident_issue_methods_reject_unsafe_incident_id_before_http(
     incident_id: str,
 ) -> None:
@@ -349,6 +354,41 @@ def test_incident_issue_methods_reject_unsafe_incident_id_before_http(
 @pytest.mark.parametrize(
     "response",
     [
+        HttpResponse(
+            status=200,
+            body=json.dumps(
+                {"total_count": 101, "incomplete_results": False, "items": []}
+            ).encode(),
+        ),
+        HttpResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "total_count": 2,
+                    "incomplete_results": False,
+                    "items": [
+                        {
+                            "body": "unrelated",
+                            "html_url": "https://github.com/synthetic-org/incidents/issues/1",
+                        }
+                    ],
+                }
+            ).encode(),
+        ),
+    ],
+)
+def test_issue_search_never_concludes_absence_from_truncated_results(
+    response: HttpResponse,
+) -> None:
+    client = GitHubClient("synthetic-token", transport=RecordingTransport(response))
+
+    with pytest.raises(IntegrationError, match="invalid"):
+        client.find_issue_by_incident_id("synthetic-org/incidents", INCIDENT_ID)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
         HttpResponse(status=500, body=b"SENSITIVE-RESPONSE-MARKER"),
         HttpResponse(status=200, body=b"not-json"),
         HttpResponse(status=200, body=b"x" * 1_000_001),
@@ -360,7 +400,7 @@ def test_incident_issue_methods_reject_unsafe_incident_id_before_http(
                     "incomplete_results": False,
                     "items": [
                         {
-                            "body": "<!-- incident-id:inc-123 -->",
+                            "body": f"<!-- incident-id:{INCIDENT_ID} -->",
                             "html_url": "https://attacker.invalid/leak",
                         }
                     ],
@@ -373,7 +413,7 @@ def test_issue_search_response_errors_are_sanitized(response: HttpResponse) -> N
     client = GitHubClient("synthetic-token", transport=RecordingTransport(response))
 
     with pytest.raises(IntegrationError) as captured:
-        client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123")
+        client.find_issue_by_incident_id("synthetic-org/incidents", INCIDENT_ID)
 
     rendered = "".join(traceback.format_exception(captured.value))
     assert "SENSITIVE-RESPONSE-MARKER" not in rendered
@@ -386,6 +426,20 @@ def test_issue_creation_rejects_oversized_body_before_http() -> None:
     client = GitHubClient("synthetic-token", transport=transport)
 
     with pytest.raises(ValueError, match="Issue Markdown"):
-        client.create_incident_issue("synthetic-org/incidents", "inc-123", "x" * 65_001)
+        client.create_incident_issue("synthetic-org/incidents", INCIDENT_ID, "x" * 65_001)
 
     assert transport.calls == []
+
+
+def test_issue_creation_rejects_credential_shaped_markdown_before_http() -> None:
+    marker = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    transport = RecordingTransport(HttpResponse(status=201, body=b"{}"))
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    with pytest.raises(ValueError) as captured:
+        client.create_incident_issue(
+            "synthetic-org/incidents", INCIDENT_ID, f"unsafe credential {marker}"
+        )
+
+    assert transport.calls == []
+    assert marker not in "".join(traceback.format_exception(captured.value))

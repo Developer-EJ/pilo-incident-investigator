@@ -8,6 +8,8 @@ from typing import Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from pilo_incident_investigator.redaction import Redactor
+
 MAX_DEPLOYMENTS = 10
 MAX_CHANGED_FILES = 100
 MAX_ISSUE_MARKDOWN_CHARS = 65_000
@@ -16,7 +18,7 @@ MAX_RESPONSE_BYTES = 1_000_000
 REQUEST_TIMEOUT_SECONDS = 5.0
 GITHUB_API_BASE = "https://api.github.com"
 _REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
-_INCIDENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_INCIDENT_ID_PATTERN = re.compile(r"inc-[0-9a-f]{20}")
 
 
 class IntegrationError(RuntimeError):
@@ -90,7 +92,7 @@ class GitHubClient:
         self._api_base = GITHUB_API_BASE
 
     def recent_deployments(self, repository: str, since: datetime) -> tuple[Deployment, ...]:
-        _require_repository(repository)
+        validate_repository(repository)
         if since.tzinfo is None or since.utcoffset() is None:
             raise ValueError("since must be timezone-aware")
         query = urlencode({"environment": "dev", "per_page": MAX_DEPLOYMENTS})
@@ -126,7 +128,7 @@ class GitHubClient:
         )
 
     def changed_files(self, repository: str, limit: int) -> tuple[ChangedFile, ...]:
-        _require_repository(repository)
+        validate_repository(repository)
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -157,8 +159,8 @@ class GitHubClient:
 
     def find_issue_by_incident_id(self, repository: str, incident_id: str) -> str | None:
         """Find an open or closed Issue containing the exact incident marker line."""
-        _require_repository(repository)
-        _require_incident_id(incident_id)
+        validate_repository(repository)
+        validate_incident_id(incident_id)
         marker = f"<!-- incident-id:{incident_id} -->"
         matches: list[str] = []
         for state in ("open", "closed"):
@@ -186,12 +188,13 @@ class GitHubClient:
 
     def create_incident_issue(self, repository: str, incident_id: str, issue_markdown: str) -> str:
         """Create one private incident Issue with an idempotency marker."""
-        _require_repository(repository)
-        _require_incident_id(incident_id)
+        validate_repository(repository)
+        validate_incident_id(incident_id)
         if not isinstance(issue_markdown, str) or not (
             1 <= len(issue_markdown) <= MAX_ISSUE_MARKDOWN_CHARS
         ):
             raise ValueError("Issue Markdown must be non-empty and bounded")
+        _require_safe_text(issue_markdown, "Issue Markdown")
         marker = f"<!-- incident-id:{incident_id} -->"
         request_body = json.dumps(
             {
@@ -268,7 +271,8 @@ def _parse_changed_file(raw: object) -> ChangedFile:
     return ChangedFile(path=path, status=status)
 
 
-def _require_repository(repository: str) -> None:
+def validate_repository(repository: str) -> None:
+    """Validate one bounded GitHub owner/repository identifier."""
     segments = repository.split("/")
     if _REPOSITORY_PATTERN.fullmatch(repository) is None or any(
         segment in {".", ".."} for segment in segments
@@ -276,9 +280,10 @@ def _require_repository(repository: str) -> None:
         raise ValueError("repository must be an owner/name pair")
 
 
-def _require_incident_id(incident_id: str) -> None:
+def validate_incident_id(incident_id: str) -> None:
+    """Validate the canonical incident ID used by keys and hidden markers."""
     if not isinstance(incident_id, str) or _INCIDENT_ID_PATTERN.fullmatch(incident_id) is None:
-        raise ValueError("incident ID must be a safe structural identifier")
+        raise ValueError("incident ID must use the canonical format")
 
 
 def _parse_search_items(raw: object, repository: str) -> tuple[tuple[str, str], ...]:
@@ -294,6 +299,7 @@ def _parse_search_items(raw: object, repository: str) -> tuple[tuple[str, str], 
         or incomplete_results
         or not isinstance(items, list)
         or len(items) > MAX_ISSUE_SEARCH_RESULTS
+        or total_count != len(items)
     ):
         raise TypeError
     parsed: list[tuple[str, str]] = []
@@ -318,3 +324,9 @@ def _require_issue_url(issue_url: object, repository: str) -> str:
     ):
         raise ValueError
     return issue_url
+
+
+def _require_safe_text(value: str, field_name: str) -> None:
+    redacted, report = Redactor().redact_text(value)
+    if report.replacements or redacted != value:
+        raise ValueError(f"{field_name} contains a credential shape")

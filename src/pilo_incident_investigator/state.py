@@ -26,7 +26,7 @@ class IncidentStateStore(Protocol):
 
     def mark_issue_published(self, event_id: str) -> bool: ...
 
-    def mark_slack_attempted(self, event_id: str) -> bool: ...
+    def mark_slack_attempted(self, event_id: str, status: str) -> bool: ...
 
 
 class DynamoTable(Protocol):
@@ -49,6 +49,9 @@ class DynamoIncidentStateStore:
                     "incident_id": incident_id,
                     "checkpoint": Checkpoint.CLAIMED.value,
                     "checkpoint_rank": _CHECKPOINT_RANK[Checkpoint.CLAIMED],
+                    "bundle_stored": False,
+                    "issue_published": False,
+                    "slack_status": "not_attempted",
                 },
                 ConditionExpression="attribute_not_exists(event_id)",
             )
@@ -62,13 +65,54 @@ class DynamoIncidentStateStore:
         return self._advance(event_id, Checkpoint.SNAPSHOT_COMPLETE)
 
     def mark_bundle_stored(self, event_id: str) -> bool:
-        return self._advance(event_id, Checkpoint.BUNDLE_STORED)
+        return self._record_outcome(
+            event_id,
+            attribute="bundle_stored",
+            value=True,
+            checkpoint=Checkpoint.BUNDLE_STORED,
+        )
 
     def mark_issue_published(self, event_id: str) -> bool:
-        return self._advance(event_id, Checkpoint.ISSUE_PUBLISHED)
+        return self._record_outcome(
+            event_id,
+            attribute="issue_published",
+            value=True,
+            checkpoint=Checkpoint.ISSUE_PUBLISHED,
+        )
 
-    def mark_slack_attempted(self, event_id: str) -> bool:
-        return self._advance(event_id, Checkpoint.SLACK_ATTEMPTED)
+    def mark_slack_attempted(self, event_id: str, status: str) -> bool:
+        if status not in {"sent", "failed"}:
+            raise ValueError("Slack status must be sent or failed")
+        return self._record_outcome(
+            event_id,
+            attribute="slack_status",
+            value=status,
+            checkpoint=Checkpoint.SLACK_ATTEMPTED,
+        )
+
+    def _record_outcome(
+        self,
+        event_id: str,
+        *,
+        attribute: str,
+        value: bool | str,
+        checkpoint: Checkpoint,
+    ) -> bool:
+        _require_identifier(event_id, "event ID")
+        try:
+            self._table.update_item(
+                Key={"event_id": event_id},
+                UpdateExpression="SET #outcome = :outcome",
+                ConditionExpression="attribute_exists(event_id)",
+                ExpressionAttributeNames={"#outcome": attribute},
+                ExpressionAttributeValues={":outcome": value},
+            )
+        except ClientError as error:
+            if _is_conditional_failure(error):
+                return False
+            raise
+        self._advance(event_id, checkpoint)
+        return True
 
     def _advance(self, event_id: str, checkpoint: Checkpoint) -> bool:
         _require_identifier(event_id, "event ID")

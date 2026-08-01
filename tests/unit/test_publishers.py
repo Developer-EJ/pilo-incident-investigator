@@ -15,8 +15,12 @@ from pilo_incident_investigator.publishers import (
     BundleStoreFailed,
     PublicationPayload,
     Publisher,
+    PublisherStateFailed,
     SlackWebhookClient,
 )
+
+INCIDENT_ID = "inc-0123456789abcdefabcd"
+BUNDLE_BYTES = b'{"incident_id":"inc-0123456789abcdefabcd"}'
 
 
 class RecordingS3:
@@ -87,10 +91,10 @@ class RecordingState:
         self.fail_at = fail_at
         self.failure = failure or RuntimeError("SENSITIVE-STATE-ERROR")
         self.result = result
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, ...]] = []
 
-    def _mark(self, name: str, event_id: str) -> bool:
-        self.calls.append((name, event_id))
+    def _mark(self, name: str, event_id: str, *details: str) -> bool:
+        self.calls.append((name, event_id, *details))
         if self.fail_at == name:
             raise self.failure
         return self.result
@@ -101,15 +105,15 @@ class RecordingState:
     def mark_issue_published(self, event_id: str) -> bool:
         return self._mark("issue", event_id)
 
-    def mark_slack_attempted(self, event_id: str) -> bool:
-        return self._mark("slack", event_id)
+    def mark_slack_attempted(self, event_id: str, status: str) -> bool:
+        return self._mark("slack", event_id, status)
 
 
 def payload(**overrides: object) -> PublicationPayload:
     values: dict[str, object] = {
         "event_id": "evt-123",
-        "incident_id": "inc-123",
-        "bundle_bytes": b'{"incident_id":"inc-123"}',
+        "incident_id": INCIDENT_ID,
+        "bundle_bytes": BUNDLE_BYTES,
         "issue_markdown": "## Incident Brief\n\nSafe summary.",
         "slack_summary": "API alarms require investigation",
     }
@@ -155,25 +159,27 @@ def test_publish_order_and_exact_s3_arguments() -> None:
     assert s3.requests == [
         {
             "Bucket": "synthetic-private-bucket",
-            "Key": "incidents/inc-123/bundle.json",
-            "Body": b'{"incident_id":"inc-123"}',
+            "Key": f"incidents/{INCIDENT_ID}/bundle.json",
+            "Body": BUNDLE_BYTES,
             "ContentType": "application/json",
             "ServerSideEncryption": "AES256",
         }
     ]
     assert github.created == [
-        ("synthetic-org/incidents", "inc-123", "## Incident Brief\n\nSafe summary.")
+        ("synthetic-org/incidents", INCIDENT_ID, "## Incident Brief\n\nSafe summary.")
     ]
     assert slack.messages == [
-        "inc-123 — API alarms require investigation — "
+        f"{INCIDENT_ID} — API alarms require investigation — "
         "https://github.com/synthetic-org/incidents/issues/7"
     ]
     assert state.calls == [
         ("bundle", "evt-123"),
         ("issue", "evt-123"),
-        ("slack", "evt-123"),
+        ("slack", "evt-123", "sent"),
     ]
-    assert result.bundle_uri == "s3://synthetic-private-bucket/incidents/inc-123/bundle.json"
+    assert result.bundle_uri == (
+        f"s3://synthetic-private-bucket/incidents/{INCIDENT_ID}/bundle.json"
+    )
     assert result.issue_url == "https://github.com/synthetic-org/incidents/issues/7"
     assert result.slack_status == "sent"
 
@@ -215,7 +221,7 @@ def test_existing_issue_is_reused_without_creating_another() -> None:
     assert calls == ["s3", "github", "slack"]
     assert github.created == []
     assert result.issue_url == url
-    assert slack.messages == [f"inc-123 — API alarms require investigation — {url}"]
+    assert slack.messages == [f"{INCIDENT_ID} — API alarms require investigation — {url}"]
     assert state.calls[1] == ("issue", "evt-123")
 
 
@@ -248,7 +254,7 @@ def test_github_failure_sends_only_fixed_degraded_message(failure_stage: str) ->
 
     result = subject.publish(
         payload(
-            bundle_bytes=b"SENSITIVE-BUNDLE-DATA",
+            bundle_bytes=b'{"detail":"SENSITIVE-BUNDLE-DATA"}',
             issue_markdown="SENSITIVE-ISSUE-BODY",
             slack_summary="SENSITIVE-SUMMARY-MUST-NOT-BE-DEGRADED",
         )
@@ -256,11 +262,11 @@ def test_github_failure_sends_only_fixed_degraded_message(failure_stage: str) ->
 
     assert result.issue_url is None
     assert result.slack_status == "sent"
-    assert slack.messages == ["inc-123 — degraded: issue publication failed"]
+    assert slack.messages == [f"{INCIDENT_ID} — degraded: issue publication failed"]
     rendered = repr(result) + repr(slack.messages) + repr(state.calls)
     assert "SENSITIVE" not in rendered
     assert ("issue", "evt-123") not in state.calls
-    assert state.calls[-1] == ("slack", "evt-123")
+    assert state.calls[-1] == ("slack", "evt-123", "sent")
 
 
 def test_degraded_slack_failure_is_recorded_without_raising() -> None:
@@ -275,8 +281,8 @@ def test_degraded_slack_failure_is_recorded_without_raising() -> None:
 
     assert result.issue_url is None
     assert result.slack_status == "failed"
-    assert slack.messages == ["inc-123 — degraded: issue publication failed"]
-    assert state.calls[-1] == ("slack", "evt-123")
+    assert slack.messages == [f"{INCIDENT_ID} — degraded: issue publication failed"]
+    assert state.calls[-1] == ("slack", "evt-123", "failed")
 
 
 def test_normal_slack_failure_is_recorded_without_raising() -> None:
@@ -289,7 +295,7 @@ def test_normal_slack_failure_is_recorded_without_raising() -> None:
 
     assert result.issue_url == "https://github.com/synthetic-org/incidents/issues/7"
     assert result.slack_status == "failed"
-    assert state.calls[-1] == ("slack", "evt-123")
+    assert state.calls[-1] == ("slack", "evt-123", "failed")
 
 
 def test_retry_reuses_issue_but_may_send_duplicate_slack_with_incident_id() -> None:
@@ -303,11 +309,11 @@ def test_retry_reuses_issue_but_may_send_duplicate_slack_with_incident_id() -> N
     assert len(s3.requests) == 2
     assert len(github.created) == 1
     assert len(slack.messages) == 2
-    assert all("inc-123" in message for message in slack.messages)
-    assert state.calls.count(("slack", "evt-123")) == 2
+    assert all(INCIDENT_ID in message for message in slack.messages)
+    assert state.calls.count(("slack", "evt-123", "sent")) == 2
 
 
-def test_already_advanced_checkpoints_do_not_block_idempotent_retry() -> None:
+def test_unclaimed_publisher_state_blocks_publication_after_s3() -> None:
     calls: list[str] = []
     state = RecordingState(result=False)
     subject, _, github, slack, _ = publisher(
@@ -319,19 +325,13 @@ def test_already_advanced_checkpoints_do_not_block_idempotent_retry() -> None:
         state=state,
     )
 
-    result = subject.publish(payload())
+    with pytest.raises(PublisherStateFailed, match="not claimed"):
+        subject.publish(payload())
 
-    assert result.issue_url == "https://github.com/synthetic-org/incidents/issues/4"
+    assert calls == ["s3"]
     assert github.created == []
-    assert slack.messages == [
-        "inc-123 — API alarms require investigation — "
-        "https://github.com/synthetic-org/incidents/issues/4"
-    ]
-    assert state.calls == [
-        ("bundle", "evt-123"),
-        ("issue", "evt-123"),
-        ("slack", "evt-123"),
-    ]
+    assert slack.messages == []
+    assert state.calls == [("bundle", "evt-123")]
 
 
 @pytest.mark.parametrize(
@@ -371,17 +371,72 @@ def test_invalid_payload_is_rejected_before_external_calls(field: str, value: ob
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("field", "unsafe_id"),
+    [
+        ("incident_id", "inc-123"),
+        ("incident_id", "inc-0123456789ABCDEFABCD"),
+        ("event_id", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"),
+    ],
+)
+def test_noncanonical_or_credential_shaped_ids_are_rejected_without_side_effects(
+    field: str, unsafe_id: str
+) -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError) as captured:
+        payload(**{field: unsafe_id})
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert calls == []
+    assert state.calls == []
+    assert unsafe_id not in rendered
+
+
+@pytest.mark.parametrize("repository", ["../repo", "owner/..", "owner/.", "./repo"])
+def test_publisher_rejects_repository_dot_segments_before_s3(repository: str) -> None:
+    calls: list[str] = []
+
+    with pytest.raises(ValueError, match="repository"):
+        Publisher(
+            bundle_bucket="synthetic-private-bucket",
+            github_repository=repository,
+            s3=RecordingS3(calls),
+            github=RecordingGitHub(calls),
+            slack=RecordingSlack(calls),
+            state=RecordingState(),
+        )
+
+    assert calls == []
+
+
+def test_credential_shaped_bundle_bytes_are_rejected_before_every_sink() -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    subject, _, _, _, _ = publisher(calls, state=state)
+    marker = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+
+    with pytest.raises(ValueError) as captured:
+        subject.publish(payload(bundle_bytes=f'{{"token":"{marker}"}}'.encode()))
+
+    assert calls == []
+    assert state.calls == []
+    assert marker not in "".join(traceback.format_exception(captured.value))
+
+
 def test_publication_payload_repr_hides_publishable_content() -> None:
     publication = payload(
-        bundle_bytes=b"SENSITIVE-BUNDLE",
-        issue_markdown="SENSITIVE-ISSUE",
-        slack_summary="SENSITIVE-SUMMARY",
+        bundle_bytes=b'{"detail":"PRIVATE-BUNDLE"}',
+        issue_markdown="PRIVATE-ISSUE",
+        slack_summary="PRIVATE-SUMMARY",
     )
 
     rendered = repr(publication)
 
     assert rendered == "PublicationPayload(redacted=True)"
-    assert "SENSITIVE" not in rendered
+    assert "PRIVATE" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -512,3 +567,18 @@ def test_slack_transport_failure_is_sanitized() -> None:
         client.send_text("inc-123 — safe")
 
     assert secret not in "".join(traceback.format_exception(captured.value))
+
+
+def test_slack_adapter_rejects_credential_shaped_text_before_http() -> None:
+    marker = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    transport = WebTransport(WebResponse(status=200, body=b"ok"))
+    client = SlackWebhookClient(
+        "https://hooks.slack.com/services/T000/B000/PRIVATE",
+        transport=transport,
+    )
+
+    with pytest.raises(ValueError) as captured:
+        client.send_text(f"{INCIDENT_ID} — {marker}")
+
+    assert transport.calls == []
+    assert marker not in "".join(traceback.format_exception(captured.value))
