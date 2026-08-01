@@ -67,6 +67,10 @@ def now() -> datetime:
     return datetime(2026, 8, 1, 12, tzinfo=UTC)
 
 
+def expected_evidence_id(request: ToolRequest, prefix: str, index: int) -> str:
+    return f"tool-local-{prefix}-{request.deduplication_key()[5:21]}-{index}"
+
+
 def test_service_log_search_bounds_request_and_truncates_normalized_evidence() -> None:
     logs = RecordingClient(
         {
@@ -83,8 +87,8 @@ def test_service_log_search_bounds_request_and_truncates_normalized_evidence() -
 
     assert result.failure is None
     assert [item.evidence_id for item in result.evidence] == [
-        "tool-local-service-log-search-1",
-        "tool-local-service-log-search-2",
+        expected_evidence_id(result.request, "service-log-search", 1),
+        expected_evidence_id(result.request, "service-log-search", 2),
     ]
     assert result.evidence[0].data == {
         "log_group": "/aws/ecs/pilo-dev-service-01",
@@ -114,7 +118,7 @@ def test_rds_events_is_bounded_and_normalizes_response() -> None:
     result = RdsEventsTool(rds, clock=now).execute(request_for("rds_events", "pilo-dev-db-01"))
 
     assert result.failure is None
-    assert result.evidence[0].evidence_id == "tool-local-rds-events-1"
+    assert result.evidence[0].evidence_id == expected_evidence_id(result.request, "rds-events", 1)
     assert result.evidence[0].data == {
         "database": "pilo-dev-db-01",
         "occurred_at": "2026-08-01T11:30:00+00:00",
@@ -157,15 +161,29 @@ def test_secret_rotation_metadata_uses_only_describe_secret() -> None:
         )
 
     assert result.failure is None
-    assert result.evidence[0].evidence_id == "tool-local-secret-rotation-metadata-1"
+    assert result.evidence[0].evidence_id == expected_evidence_id(
+        result.request, "secret-rotation-metadata", 1
+    )
     assert result.evidence[0].data == {
-        "secret": "pilo-dev-secret-01",
         "rotation_enabled": True,
         "last_rotated_at": "2026-07-31T00:00:00+00:00",
         "last_changed_at": "2026-08-01T00:00:00+00:00",
         "version_stages": ["AWSCURRENT", "AWSPREVIOUS"],
     }
     assert version_identifier not in repr(result.evidence[0].data)
+
+
+def test_evidence_ids_are_stable_per_request_and_unique_across_resources() -> None:
+    response = {"events": [{"timestamp": 1_000, "message": "same event"}]}
+    first_request = request_for("service_log_search", "/aws/ecs/pilo-dev-service-01")
+    second_request = request_for("service_log_search", "/aws/ecs/pilo-dev-service-02")
+
+    first = ServiceLogSearchTool(RecordingClient(response), clock=now).execute(first_request)
+    repeated = ServiceLogSearchTool(RecordingClient(response), clock=now).execute(first_request)
+    second = ServiceLogSearchTool(RecordingClient(response), clock=now).execute(second_request)
+
+    assert first.evidence[0].evidence_id == repeated.evidence[0].evidence_id
+    assert first.evidence[0].evidence_id != second.evidence[0].evidence_id
 
 
 def test_sqs_status_uses_queue_attributes_and_optional_oldest_message_metric() -> None:

@@ -39,6 +39,7 @@ MAX_RDS_EVENTS = 100
 MAX_CHANGED_FILES = 100
 MAX_TEXT_LENGTH = 500
 MAX_STATUS_LENGTH = 100
+REQUEST_HASH_LENGTH = 16
 LOG_LOOKBACK = timedelta(hours=1)
 RDS_EVENT_DURATION_MINUTES = 60
 
@@ -171,7 +172,7 @@ class SecretRotationMetadataTool:
         observed_at = self._clock()
         try:
             response = self._secrets.describe_secret(SecretId=request.resource_key)
-            data = _normalize_secret_metadata(response, request.resource_key)
+            data = _normalize_secret_metadata(response)
         except (BotoCoreError, ClientError, IntegrationError, OSError, TimeoutError):
             return _failure(request, "aws_api_error", "bounded secret metadata request failed")
         except _InvalidResponse:
@@ -282,9 +283,10 @@ def _evidence_result(
     observed_at: datetime,
     rows: list[dict[str, JsonValue]],
 ) -> ToolResult:
+    request_hash = request.deduplication_key()[len("tool-") : len("tool-") + REQUEST_HASH_LENGTH]
     evidence = tuple(
         Evidence(
-            evidence_id=f"tool-local-{local_prefix}-{index}",
+            evidence_id=f"tool-local-{local_prefix}-{request_hash}-{index}",
             source=request.tool,
             observed_at=observed_at,
             summary=summary,
@@ -338,7 +340,7 @@ def _normalize_rds_event(row: dict[str, Any], database: str) -> dict[str, JsonVa
     }
 
 
-def _normalize_secret_metadata(response: object, secret: str) -> dict[str, JsonValue]:
+def _normalize_secret_metadata(response: object) -> dict[str, JsonValue]:
     if not isinstance(response, dict):
         raise _InvalidResponse
     rotation_enabled = response.get("RotationEnabled")
@@ -357,7 +359,6 @@ def _normalize_secret_metadata(response: object, secret: str) -> dict[str, JsonV
     version_stages: list[JsonValue] = []
     version_stages.extend(sorted(stages))
     return {
-        "secret": secret,
         "rotation_enabled": rotation_enabled,
         "last_rotated_at": _optional_datetime(response.get("LastRotatedDate")),
         "last_changed_at": _optional_datetime(response.get("LastChangedDate")),
