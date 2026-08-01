@@ -1,0 +1,22 @@
+version: 1
+environment: dev
+region: ap-northeast-2
+services:
+  - &service
+    key: pilo-dev-service-01
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-01
+    log_groups: [/aws/ecs/pilo-dev-service-01]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-01/0000000000000001]
+    rds_instances: [pilo-dev-db-01]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01]
+    github_repository: synthetic-org/pilo-dev-service-01
+  - {<<: *service, key: pilo-dev-service-02}
+  - {<<: *service, key: pilo-dev-service-03}
+  - {<<: *service, key: pilo-dev-service-04}
+  - {<<: *service, key: pilo-dev-service-05}
+  - {<<: *service, key: pilo-dev-service-06}
+  - {<<: *service, key: pilo-dev-service-07}
+  - {<<: *service, key: pilo-dev-service-08}
+alarms:
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01: [pilo-dev-service-01]

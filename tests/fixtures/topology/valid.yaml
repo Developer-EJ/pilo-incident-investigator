@@ -1,0 +1,77 @@
+version: 1
+environment: dev
+region: ap-northeast-2
+services:
+  - key: pilo-dev-service-01
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-01
+    log_groups: [/aws/ecs/pilo-dev-service-01]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-01/0000000000000001]
+    rds_instances: [pilo-dev-db-01]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01]
+    github_repository: synthetic-org/pilo-dev-service-01
+  - key: pilo-dev-service-02
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-02
+    log_groups: [/aws/ecs/pilo-dev-service-02]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-02/0000000000000002]
+    rds_instances: [pilo-dev-db-02]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-02]
+    github_repository: synthetic-org/pilo-dev-service-02
+  - key: pilo-dev-service-03
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-03
+    log_groups: [/aws/ecs/pilo-dev-service-03]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-03/0000000000000003]
+    rds_instances: [pilo-dev-db-03]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-03]
+    github_repository: synthetic-org/pilo-dev-service-03
+  - key: pilo-dev-service-04
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-04
+    log_groups: [/aws/ecs/pilo-dev-service-04]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-04/0000000000000004]
+    rds_instances: [pilo-dev-db-04]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-04]
+    github_repository: synthetic-org/pilo-dev-service-04
+  - key: pilo-dev-service-05
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-05
+    log_groups: [/aws/ecs/pilo-dev-service-05]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-05/0000000000000005]
+    rds_instances: [pilo-dev-db-05]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-05]
+    github_repository: synthetic-org/pilo-dev-service-05
+  - key: pilo-dev-service-06
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-06
+    log_groups: [/aws/ecs/pilo-dev-service-06]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-06/0000000000000006]
+    rds_instances: [pilo-dev-db-06]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-06]
+    github_repository: synthetic-org/pilo-dev-service-06
+  - key: pilo-dev-service-07
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-07
+    log_groups: [/aws/ecs/pilo-dev-service-07]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-07/0000000000000007]
+    rds_instances: [pilo-dev-db-07]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-07]
+    github_repository: synthetic-org/pilo-dev-service-07
+  - key: pilo-dev-service-08
+    ecs_cluster: arn:aws:ecs:ap-northeast-2:000000000000:cluster/pilo-dev
+    ecs_service: arn:aws:ecs:ap-northeast-2:000000000000:service/pilo-dev/pilo-dev-service-08
+    log_groups: [/aws/ecs/pilo-dev-service-08]
+    target_groups: [arn:aws:elasticloadbalancing:ap-northeast-2:000000000000:targetgroup/pilo-dev-service-08/0000000000000008]
+    rds_instances: [pilo-dev-db-08]
+    queues: [https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-08]
+    github_repository: synthetic-org/pilo-dev-service-08
+alarms:
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01: [pilo-dev-service-01]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-02: [pilo-dev-service-02]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-03: [pilo-dev-service-03]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-04: [pilo-dev-service-04]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-05: [pilo-dev-service-05]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-06: [pilo-dev-service-06]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-07: [pilo-dev-service-07]
+  arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-08: [pilo-dev-service-08]
