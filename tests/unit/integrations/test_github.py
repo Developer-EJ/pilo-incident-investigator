@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from pilo_incident_investigator.integrations.github import (
+    ChangedFile,
     GitHubClient,
     HttpResponse,
     IntegrationError,
@@ -73,6 +74,39 @@ def test_recent_deployments_are_bounded_filtered_and_normalized() -> None:
     assert headers["Authorization"] == "Bearer synthetic-token"
     assert body is None
     assert timeout == 5.0
+
+
+def test_changed_files_use_one_bounded_request_and_exclude_file_contents() -> None:
+    body = json.dumps(
+        {
+            "files": [
+                {"filename": "src/service.py", "status": "modified", "patch": "secret patch"},
+                {"filename": "README.md", "status": "added", "contents_url": "private URL"},
+            ]
+        }
+    ).encode()
+    transport = RecordingTransport(HttpResponse(status=200, body=body))
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    files = client.changed_files("synthetic-org/pilo-dev-service-01", limit=2)
+
+    assert files == (
+        ChangedFile(path="src/service.py", status="modified"),
+        ChangedFile(path="README.md", status="added"),
+    )
+    assert transport.calls == [
+        (
+            "GET",
+            "https://api.github.com/repos/synthetic-org/pilo-dev-service-01/commits/HEAD?per_page=2",
+            {
+                "Accept": "application/vnd.github+json",
+                "Authorization": "Bearer synthetic-token",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            None,
+            5.0,
+        )
+    ]
 
 
 def test_client_repr_never_contains_token() -> None:

@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 MAX_DEPLOYMENTS = 10
+MAX_CHANGED_FILES = 100
 MAX_RESPONSE_BYTES = 1_000_000
 REQUEST_TIMEOUT_SECONDS = 5.0
 GITHUB_API_BASE = "https://api.github.com"
@@ -31,6 +32,12 @@ class Deployment:
     environment: str
     revision: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ChangedFile:
+    path: str
+    status: str
 
 
 class HttpTransport(Protocol):
@@ -80,11 +87,7 @@ class GitHubClient:
         self._api_base = GITHUB_API_BASE
 
     def recent_deployments(self, repository: str, since: datetime) -> tuple[Deployment, ...]:
-        segments = repository.split("/")
-        if _REPOSITORY_PATTERN.fullmatch(repository) is None or any(
-            segment in {".", ".."} for segment in segments
-        ):
-            raise ValueError("repository must be an owner/name pair")
+        _require_repository(repository)
         if since.tzinfo is None or since.utcoffset() is None:
             raise ValueError("since must be timezone-aware")
         query = urlencode({"environment": "dev", "per_page": MAX_DEPLOYMENTS})
@@ -119,6 +122,36 @@ class GitHubClient:
             sorted(matching, key=lambda item: item.created_at, reverse=True)[:MAX_DEPLOYMENTS]
         )
 
+    def changed_files(self, repository: str, limit: int) -> tuple[ChangedFile, ...]:
+        _require_repository(repository)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_CHANGED_FILES
+        ):
+            raise ValueError("changed file limit must be between 1 and 100")
+        query = urlencode({"per_page": limit})
+        url = f"{self._api_base}/repos/{repository}/commits/HEAD?{query}"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            response = self._transport.request("GET", url, headers, None, REQUEST_TIMEOUT_SECONDS)
+        except (OSError, TimeoutError):
+            raise IntegrationError("GitHub request failed") from None
+        if response.status != 200 or len(response.body) > MAX_RESPONSE_BYTES:
+            raise IntegrationError("GitHub request failed")
+        try:
+            raw = json.loads(response.body)
+            if not isinstance(raw, dict) or not isinstance(raw.get("files"), list):
+                raise TypeError
+            files = tuple(_parse_changed_file(item) for item in raw["files"])
+        except (UnicodeError, ValueError, TypeError, KeyError):
+            raise IntegrationError("GitHub response was invalid") from None
+        return files[:limit]
+
     def __repr__(self) -> str:
         return "GitHubClient(redacted=True)"
 
@@ -145,3 +178,21 @@ def _parse_deployment(raw: object) -> Deployment:
         revision=revision,
         created_at=parsed_time,
     )
+
+
+def _parse_changed_file(raw: object) -> ChangedFile:
+    if not isinstance(raw, dict):
+        raise TypeError
+    path = raw.get("filename")
+    status = raw.get("status")
+    if not isinstance(path, str) or not path or not isinstance(status, str) or not status:
+        raise TypeError
+    return ChangedFile(path=path, status=status)
+
+
+def _require_repository(repository: str) -> None:
+    segments = repository.split("/")
+    if _REPOSITORY_PATTERN.fullmatch(repository) is None or any(
+        segment in {".", ".."} for segment in segments
+    ):
+        raise ValueError("repository must be an owner/name pair")
