@@ -1,5 +1,7 @@
 """Immutable domain contracts shared across the incident pipeline."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
@@ -84,6 +86,19 @@ class ToolRequest:
 
     def __post_init__(self) -> None:
         _require_json_safe(self.parameters, "tool_request.parameters")
+
+    def deduplication_key(self) -> str:
+        canonical = json.dumps(
+            {
+                "parameters": self.parameters,
+                "resource_key": self.resource_key,
+                "tool": self.tool,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return f"tool-{hashlib.sha256(canonical).hexdigest()}"
 
 
 @dataclass(frozen=True, slots=True)
