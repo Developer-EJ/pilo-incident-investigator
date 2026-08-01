@@ -19,7 +19,7 @@ REQUEST_TIMEOUT_SECONDS = 5.0
 GITHUB_API_BASE = "https://api.github.com"
 _REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 _INCIDENT_ID_PATTERN = re.compile(r"inc-[0-9a-f]{20}")
-_INCIDENT_MARKER_PATTERN = re.compile(r"<!--\s*incident-id\s*:\s*inc-[^>\r\n]*-->", re.IGNORECASE)
+_HTML_COMMENT_PATTERN = re.compile(r"<!--(?P<content>[\s\S]*?)-->")
 
 
 class IntegrationError(RuntimeError):
@@ -290,8 +290,10 @@ def validate_issue_markdown(issue_markdown: str) -> None:
     ):
         raise ValueError("Issue Markdown must be non-empty and bounded")
     _require_safe_text(issue_markdown, "Issue Markdown")
-    if _INCIDENT_MARKER_PATTERN.search(issue_markdown) is not None:
-        raise ValueError("Issue Markdown contains a reserved hidden marker")
+    for comment in _HTML_COMMENT_PATTERN.finditer(issue_markdown):
+        normalized = re.sub(r"\s+", "", comment.group("content")).casefold()
+        if normalized == "incident-id" or normalized.startswith("incident-id:"):
+            raise ValueError("Issue Markdown contains a reserved hidden marker")
 
 
 def _parse_search_items(raw: object, repository: str) -> tuple[tuple[str, str], ...]:

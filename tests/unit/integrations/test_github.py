@@ -451,6 +451,9 @@ def test_issue_creation_rejects_credential_shaped_markdown_before_http() -> None
         f"<!-- incident-id:{INCIDENT_ID} -->\ncurrent marker",
         "<!-- incident-id:inc-11111111111111111111 -->\nfuture search confusion",
         "<!--  INCIDENT-ID : inc-22222222222222222222  -->\nmarker-like",
+        "<!-- incident-id:attacker -->\nnoncanonical marker",
+        "<!-- incident-id -->\nmarker without value",
+        "<!--  InCiDeNt - Id : attacker  -->\nnormalized marker",
     ],
 )
 def test_issue_creation_rejects_supplied_incident_markers_before_http(

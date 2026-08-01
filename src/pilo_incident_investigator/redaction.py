@@ -83,6 +83,28 @@ _SENSITIVE_EXACT_KEYS = frozenset(
     }
 )
 _REDACTED_SENTINEL = re.compile(r"\[REDACTED:[A-Z_]+\]")
+_APPROVED_REDACTION_SENTINELS = frozenset(
+    {
+        "[REDACTED:AUTHORIZATION]",
+        "[REDACTED:AWS_ACCESS_KEY]",
+        "[REDACTED:CREDENTIAL]",
+        "[REDACTED:GITHUB_TOKEN]",
+        "[REDACTED:QUERY_CREDENTIAL]",
+        "[REDACTED:SENSITIVE_FIELD]",
+        "[REDACTED:SLACK_TOKEN]",
+        "[REDACTED:WEBHOOK_URL]",
+    }
+)
+_QUOTED_STRUCTURED_FIELD = re.compile(
+    r"(?P<key_quote>[\"'])(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})(?P=key_quote)"
+    r"\s*:\s*(?P<value_quote>[\"'])(?P<value>(?:\\.|(?!(?P=value_quote))[\s\S])*)"
+    r"(?P=value_quote)"
+)
+_ESCAPED_QUOTED_STRUCTURED_FIELD = re.compile(
+    r"\\(?P<key_quote>[\"'])(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})"
+    r"\\(?P=key_quote)\s*:\s*\\(?P<value_quote>[\"'])"
+    r"(?P<value>[\s\S]*?)\\(?P=value_quote)"
+)
 _STANDALONE_AUTHORIZATION = re.compile(
     r"(?i)\b(?P<scheme>bearer|basic)\s+"
     r"(?P<credential>(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+)"
@@ -101,7 +123,20 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""[^"'\s,;]+))"""
 )
 _SENSITIVE_SINGLE_TOKENS = frozenset(
-    {"password", "passwd", "secret", "token", "authorization", "credential", "credentials"}
+    {
+        "authorization",
+        "authorizations",
+        "credential",
+        "credentials",
+        "password",
+        "passwords",
+        "passwd",
+        "passwds",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+    }
 )
 _SENSITIVE_TOKEN_PAIRS = frozenset(
     {
@@ -113,6 +148,14 @@ _SENSITIVE_TOKEN_PAIRS = frozenset(
         ("access", "key"),
         ("private", "key"),
         ("webhook", "url"),
+        ("client", "secrets"),
+        ("refresh", "tokens"),
+        ("id", "tokens"),
+        ("auth", "tokens"),
+        ("api", "keys"),
+        ("access", "keys"),
+        ("private", "keys"),
+        ("webhook", "urls"),
     }
 )
 
@@ -262,20 +305,47 @@ class Redactor:
         raise TypeError
 
     def _redact_sensitive_field(self, value: str, counts: Counter[str]) -> str:
-        if _REDACTED_SENTINEL.fullmatch(value):
+        if value in _APPROVED_REDACTION_SENTINELS:
             return value
         counts["SENSITIVE_FIELD"] += 1
         return "[REDACTED:SENSITIVE_FIELD]"
 
     def _redact_text(self, value: str, counts: Counter[str]) -> str:
-        redacted = value
+        redacted = self._redact_unapproved_sentinels(value, counts)
         for pattern, replacement, category in _RULES:
             redacted, replacements = pattern.subn(replacement, redacted)
             counts[category] += replacements
         redacted = self._redact_query_credentials(redacted, counts)
         redacted = self._redact_standalone_authorization(redacted, counts)
+        redacted = self._redact_structured_credentials(redacted, counts)
         redacted = self._redact_assignments(redacted, counts)
         return redacted
+
+    def _redact_unapproved_sentinels(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if match.group(0) in _APPROVED_REDACTION_SENTINELS:
+                return match.group(0)
+            counts["SENSITIVE_FIELD"] += 1
+            return "[REDACTED:SENSITIVE_FIELD]"
+
+        return _REDACTED_SENTINEL.sub(replace, value)
+
+    def _redact_structured_credentials(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if not _is_sensitive_key(match.group("key")):
+                return match.group(0)
+            if match.group("value") in _APPROVED_REDACTION_SENTINELS:
+                return match.group(0)
+            counts["SENSITIVE_FIELD"] += 1
+            quote = match.group("value_quote")
+            key_quote = match.group("key_quote")
+            return (
+                f"{key_quote}{match.group('key')}{key_quote}:"
+                f"{quote}[REDACTED:SENSITIVE_FIELD]{quote}"
+            )
+
+        redacted = _ESCAPED_QUOTED_STRUCTURED_FIELD.sub(replace, value)
+        return _QUOTED_STRUCTURED_FIELD.sub(replace, redacted)
 
     def _redact_standalone_authorization(self, value: str, counts: Counter[str]) -> str:
         def replace(match: re.Match[str]) -> str:

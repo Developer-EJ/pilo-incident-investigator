@@ -553,3 +553,55 @@ def test_redact_json_preserves_secret_rotation_metadata_primitives() -> None:
 
     assert redacted == value
     assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"password":"opaque-secret"}',
+        r"{\"password\":\"opaque-secret\"}",
+    ],
+)
+def test_redact_json_detects_embedded_json_credentials_in_log_strings(message: str) -> None:
+    value: JsonValue = {"message": message}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements > 0
+    assert "opaque-secret" not in repr(redacted)
+
+
+def test_redact_json_preserves_safe_structured_log_strings() -> None:
+    value: JsonValue = {
+        "message": '{"status":"healthy","rotation_enabled":true}',
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize("wrapper", ["secrets", "tokens", "passwords", "clientSecrets"])
+def test_plural_sensitive_wrappers_create_sensitive_context(wrapper: str) -> None:
+    value: JsonValue = {wrapper: {"database": "opaque-secret"}}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    ["[REDACTED:UNAPPROVED]", "[REDACTED:FAKE]"],
+)
+def test_unapproved_redaction_sentinel_is_not_idempotently_trusted(sentinel: str) -> None:
+    value: JsonValue = {"clientSecret": {"nested": sentinel}}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == {"clientSecret": {"nested": "[REDACTED:SENSITIVE_FIELD]"}}
+    assert report.replacements == 1
