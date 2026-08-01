@@ -443,3 +443,31 @@ def test_issue_creation_rejects_credential_shaped_markdown_before_http() -> None
 
     assert transport.calls == []
     assert marker not in "".join(traceback.format_exception(captured.value))
+
+
+@pytest.mark.parametrize(
+    "issue_markdown",
+    [
+        f"<!-- incident-id:{INCIDENT_ID} -->\ncurrent marker",
+        "<!-- incident-id:inc-11111111111111111111 -->\nfuture search confusion",
+        "<!--  INCIDENT-ID : inc-22222222222222222222  -->\nmarker-like",
+    ],
+)
+def test_issue_creation_rejects_supplied_incident_markers_before_http(
+    issue_markdown: str,
+) -> None:
+    transport = RecordingTransport(
+        HttpResponse(
+            status=201,
+            body=json.dumps(
+                {"html_url": "https://github.com/synthetic-org/incidents/issues/9"}
+            ).encode(),
+        )
+    )
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    with pytest.raises(ValueError) as captured:
+        client.create_incident_issue("synthetic-org/incidents", INCIDENT_ID, issue_markdown)
+
+    assert transport.calls == []
+    assert "incident-id" not in "".join(traceback.format_exception(captured.value)).casefold()

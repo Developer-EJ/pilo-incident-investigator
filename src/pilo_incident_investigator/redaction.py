@@ -123,6 +123,15 @@ class Redactor:
         redacted = self._redact_text(value, counts)
         return redacted, _report(counts)
 
+    def redact_json(self, value: JsonValue) -> tuple[JsonValue, RedactionReport]:
+        """Redact a JSON tree using the same sensitive-key context as Bundles."""
+        counts: Counter[str] = Counter()
+        try:
+            redacted = self._redact_json(value, counts)
+        except Exception:
+            raise UnsafeBundleError("JSON redaction failed") from None
+        return redacted, _report(counts)
+
     def redact_bundle(self, bundle: IncidentBundle) -> tuple[IncidentBundle, RedactionReport]:
         counts: Counter[str] = Counter()
         try:

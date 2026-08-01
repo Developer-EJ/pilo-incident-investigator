@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from math import isfinite
+from typing import Any, Protocol, cast
 from urllib.request import Request, urlopen
 
+from pilo_incident_investigator.domain import JsonValue
 from pilo_incident_investigator.integrations.github import (
     IntegrationError,
     validate_incident_id,
+    validate_issue_markdown,
     validate_repository,
 )
 from pilo_incident_investigator.redaction import Redactor, is_safe_structural_id
@@ -256,27 +259,25 @@ def _validate_publication(publication: PublicationPayload) -> None:
     ):
         raise ValueError("Bundle bytes must be non-empty and bounded")
     _validate_canonical_bundle_bytes(publication.bundle_bytes)
-    if not isinstance(publication.issue_markdown, str) or not (
-        1 <= len(publication.issue_markdown) <= MAX_ISSUE_MARKDOWN_CHARS
-    ):
-        raise ValueError("Issue Markdown must be non-empty and bounded")
+    validate_issue_markdown(publication.issue_markdown)
     if not isinstance(publication.slack_summary, str) or not (
         1 <= len(publication.slack_summary) <= MAX_SLACK_SUMMARY_CHARS
     ):
         raise ValueError("Slack summary must be non-empty and bounded")
     redactor = Redactor()
-    for value in (publication.issue_markdown, publication.slack_summary):
-        _require_safe_text(value, redactor=redactor)
+    _require_safe_text(publication.slack_summary, redactor=redactor)
 
 
 def _validate_canonical_bundle_bytes(bundle_bytes: bytes) -> None:
     try:
         text = bundle_bytes.decode("utf-8")
-        parsed = json.loads(text)
+        parsed = json.loads(text, parse_constant=_reject_json_constant)
         if not isinstance(parsed, dict):
             raise TypeError
+        _require_standard_json(parsed)
         canonical = json.dumps(
             parsed,
+            allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -285,7 +286,32 @@ def _validate_canonical_bundle_bytes(bundle_bytes: bytes) -> None:
         raise ValueError("Bundle bytes must be canonical UTF-8 JSON") from None
     if canonical != bundle_bytes:
         raise ValueError("Bundle bytes must be canonical UTF-8 JSON")
-    _require_safe_text(text)
+    semantic_value = cast(JsonValue, parsed)
+    redacted, report = Redactor().redact_json(semantic_value)
+    if report.replacements or redacted != semantic_value:
+        raise ValueError("Bundle bytes failed semantic redaction validation")
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError
+
+
+def _require_standard_json(value: object) -> None:
+    if isinstance(value, float) and not isfinite(value):
+        raise ValueError
+    if value is None or isinstance(value, bool | int | float | str):
+        return
+    if isinstance(value, list):
+        for item in value:
+            _require_standard_json(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError
+            _require_standard_json(item)
+        return
+    raise TypeError
 
 
 def _require_safe_text(value: str, *, redactor: Redactor | None = None) -> None:

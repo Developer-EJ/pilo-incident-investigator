@@ -426,6 +426,92 @@ def test_credential_shaped_bundle_bytes_are_rejected_before_every_sink() -> None
     assert marker not in "".join(traceback.format_exception(captured.value))
 
 
+@pytest.mark.parametrize(
+    "bundle_bytes",
+    [
+        b'{"token":"synthetic-opaque-value"}',
+        b'{"nested":{"password":"synthetic-opaque-value"}}',
+        b'{"items":[{"clientSecret":["synthetic-opaque-value"]}]}',
+        b'{"awsSecretAccessKey":{"part":"synthetic-opaque-value"}}',
+    ],
+)
+def test_semantically_sensitive_bundle_values_are_rejected_before_s3(
+    bundle_bytes: bytes,
+) -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError) as captured:
+        payload(bundle_bytes=bundle_bytes)
+
+    assert calls == []
+    assert state.calls == []
+    assert "synthetic-opaque-value" not in "".join(traceback.format_exception(captured.value))
+
+
+def test_redacted_bundle_sentinel_and_rotation_metadata_remain_publishable() -> None:
+    safe_bundle = json.dumps(
+        {
+            "last_rotated_at": "2026-01-01T00:00:00Z",
+            "next_rotation_at": None,
+            "password": "[REDACTED:SENSITIVE_FIELD]",
+            "rotation_enabled": True,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+    publication = payload(bundle_bytes=safe_bundle)
+
+    assert publication.bundle_bytes == safe_bundle
+
+
+@pytest.mark.parametrize(
+    "bundle_bytes",
+    [
+        b'{"value":NaN}',
+        b'{"value":Infinity}',
+        b'{"value":-Infinity}',
+        b'{"value":1e400}',
+    ],
+)
+def test_nonfinite_json_numbers_are_rejected_before_every_sink(bundle_bytes: bytes) -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError, match="canonical"):
+        payload(bundle_bytes=bundle_bytes)
+
+    assert calls == []
+    assert state.calls == []
+
+
+@pytest.mark.parametrize(
+    "issue_markdown",
+    [
+        f"<!-- incident-id:{INCIDENT_ID} -->\nInjected current marker",
+        "<!-- incident-id:inc-11111111111111111111 -->\nInjected other marker",
+        "<!--  INCIDENT-ID : inc-22222222222222222222  -->\nMarker-like",
+    ],
+)
+def test_issue_markdown_rejects_hidden_incident_marker_before_every_sink(
+    issue_markdown: str,
+) -> None:
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError) as captured:
+        payload(issue_markdown=issue_markdown)
+
+    assert calls == []
+    assert state.calls == []
+    assert "incident-id" not in "".join(traceback.format_exception(captured.value)).casefold()
+
+
 def test_publication_payload_repr_hides_publishable_content() -> None:
     publication = payload(
         bundle_bytes=b'{"detail":"PRIVATE-BUNDLE"}',
@@ -452,7 +538,7 @@ def test_publishable_text_with_credential_shape_is_rejected_before_calls(
     calls: list[str] = []
     subject, _, _, _, _ = publisher(calls)
 
-    with pytest.raises(ValueError, match="publishable text"):
+    with pytest.raises(ValueError, match="credential shape"):
         subject.publish(payload(**{field: value}))
 
     assert calls == []

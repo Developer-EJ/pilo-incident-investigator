@@ -9,6 +9,7 @@ from pilo_incident_investigator.domain import (
     Evidence,
     IncidentBundle,
     Investigation,
+    JsonValue,
     Snapshot,
     SupportedStatement,
     ToolRequest,
@@ -453,3 +454,34 @@ def test_redact_bundle_fails_closed_without_echoing_invalid_value() -> None:
 
     assert "object" not in str(caught.value)
     assert "opaque-metadata-value" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"token": "synthetic-opaque-value"},
+        {"nested": {"password": "synthetic-opaque-value"}},
+        {"items": [{"clientSecret": ["synthetic-opaque-value"]}]},
+        {"awsSecretAccessKey": {"part": "synthetic-opaque-value"}},
+    ],
+)
+def test_redact_json_uses_sensitive_key_context_for_opaque_values(value: object) -> None:
+    redacted, report = Redactor().redact_json(value)  # type: ignore[arg-type]
+
+    assert redacted != value
+    assert report.replacements > 0
+    assert "synthetic-opaque-value" not in repr(redacted)
+
+
+def test_redact_json_preserves_redacted_sentinels_and_rotation_metadata() -> None:
+    value: JsonValue = {
+        "password": "[REDACTED:SENSITIVE_FIELD]",
+        "rotation_enabled": True,
+        "last_rotated_at": "2026-01-01T00:00:00Z",
+        "next_rotation_at": None,
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
