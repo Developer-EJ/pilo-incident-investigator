@@ -3,7 +3,7 @@
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import timedelta
-from typing import Any, Protocol, cast
+from typing import Any, NoReturn, Protocol, cast
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -44,12 +44,16 @@ class AlarmTargetEcsCollector:
                 cluster=service.ecs_cluster,
                 services=[service.ecs_service],
             )
-            rows = response.get("services", [])
-            row = rows[0] if isinstance(rows, list) and rows else {}
+            _require_no_failures(response)
+            rows = _required_mappings(response, "services")
+            if len(rows) != 1:
+                _invalid_response()
+            row = rows[0]
             data: dict[str, JsonValue] = {
-                "desired": _integer(row, "desiredCount"),
-                "running": _integer(row, "runningCount"),
-                "pending": _integer(row, "pendingCount"),
+                "service": service.key,
+                "desired": _required_integer(row, "desiredCount"),
+                "running": _required_integer(row, "runningCount"),
+                "pending": _required_integer(row, "pendingCount"),
             }
             evidence.append(_evidence(context, "ecs.describe_services", "target ECS state", data))
         return tuple(evidence)
@@ -83,7 +87,7 @@ class StoppedTasksAndLogsCollector:
                 next_token = _optional_string(response.get("nextToken"))
                 if next_token is None or len(task_arns) >= MAX_TASKS:
                     break
-            task_arns = task_arns[:MAX_TASKS]
+            task_arns = sorted(set(task_arns))[:MAX_TASKS]
             if task_arns:
                 context.topology.require_allowed("ecs_cluster", service.ecs_cluster)
                 context.topology.require_allowed("ecs_service", service.ecs_service)
@@ -92,14 +96,19 @@ class StoppedTasksAndLogsCollector:
                     cluster=service.ecs_cluster,
                     tasks=task_arns,
                 )
-                for task in _mappings(response.get("tasks")):
+                _require_no_failures(response)
+                tasks = _required_mappings(response, "tasks")
+                if {_required_string(task, "taskArn") for task in tasks} != set(task_arns):
+                    _invalid_response()
+                for task in sorted(tasks, key=lambda item: _required_string(item, "taskArn")):
                     evidence.append(
                         _evidence(
                             context,
                             "ecs.describe_tasks",
                             "stopped ECS task",
                             {
-                                "task": _bounded_text(task.get("taskArn")),
+                                "service": service.key,
+                                "task": _bounded_text(_required_string(task, "taskArn")),
                                 "stop_code": _bounded_text(task.get("stopCode")),
                             },
                         )
@@ -116,15 +125,24 @@ class StoppedTasksAndLogsCollector:
                     endTime=end,
                     limit=MAX_LOG_EVENTS,
                 )
-                for event in _mappings(response.get("events"))[:MAX_LOG_EVENTS]:
+                events = _required_mappings(response, "events")[:MAX_LOG_EVENTS]
+                events.sort(
+                    key=lambda item: (
+                        _required_integer(item, "timestamp"),
+                        _required_string(item, "message"),
+                    )
+                )
+                for event in events:
                     evidence.append(
                         _evidence(
                             context,
                             "logs.filter_log_events",
                             "bounded service log event",
                             {
-                                "timestamp": _integer(event, "timestamp"),
-                                "message": _bounded_text(event.get("message")),
+                                "service": service.key,
+                                "log_group": log_group,
+                                "timestamp": _required_integer(event, "timestamp"),
+                                "message": _bounded_text(_required_string(event, "message")),
                             },
                         )
                     )
@@ -145,17 +163,24 @@ class AlbTargetHealthCollector:
                 response = _aws_call(
                     self._elbv2.describe_target_health, TargetGroupArn=target_group
                 )
-                states: list[JsonValue] = [
-                    _bounded_text(item.get("TargetHealth", {}).get("State"))
-                    for item in _mappings(response.get("TargetHealthDescriptions"))
-                    if isinstance(item.get("TargetHealth"), dict)
-                ]
+                descriptions = _required_mappings(response, "TargetHealthDescriptions")
+                states: list[JsonValue] = []
+                for item in descriptions:
+                    target_health = item.get("TargetHealth")
+                    if not isinstance(target_health, dict):
+                        _invalid_response()
+                    states.append(_required_string(cast(dict[str, Any], target_health), "State"))
+                states.sort(key=str)
                 evidence.append(
                     _evidence(
                         context,
                         "elbv2.describe_target_health",
                         "ALB target health",
-                        {"states": states},
+                        {
+                            "service": service.key,
+                            "target_group": target_group,
+                            "states": states,
+                        },
                     )
                 )
         return tuple(evidence)
@@ -181,15 +206,24 @@ class AllPiloServicesCollector:
                 cluster=cluster,
                 services=[service.ecs_service for service in services],
             )
-            for row in _mappings(response.get("services")):
+            _require_no_failures(response)
+            rows = _required_mappings(response, "services")
+            by_name = {_required_string(row, "serviceName"): row for row in rows}
+            expected_names = {service.ecs_service.rsplit("/", 1)[-1] for service in services}
+            if set(by_name) != expected_names or len(rows) != len(services):
+                _invalid_response()
+            for service in services:
+                row = by_name[service.ecs_service.rsplit("/", 1)[-1]]
                 evidence.append(
                     _evidence(
                         context,
                         "ecs.describe_services.all_pilo",
                         "PILO service running state",
                         {
-                            "service": _bounded_text(row.get("serviceName")),
-                            "running": _integer(row, "runningCount"),
+                            "service": service.key,
+                            "desired": _required_integer(row, "desiredCount"),
+                            "running": _required_integer(row, "runningCount"),
+                            "pending": _required_integer(row, "pendingCount"),
                         },
                     )
                 )
@@ -223,6 +257,7 @@ class RecentGitHubDeploymentsCollector:
                         "github.deployments",
                         "recent GitHub deployment",
                         {
+                            "repository": repository,
                             "deployment_id": deployment.deployment_id,
                             "environment": deployment.environment,
                             "revision": _bounded_text(deployment.revision),
@@ -249,14 +284,19 @@ class RdsBasicStatusCollector:
                 seen.add(database)
                 context.topology.require_allowed("rds_instance", database)
                 response = _aws_call(self._rds.describe_db_instances, DBInstanceIdentifier=database)
-                rows = _mappings(response.get("DBInstances"))
-                row = rows[0] if rows else {}
+                rows = _required_mappings(response, "DBInstances")
+                if len(rows) != 1:
+                    _invalid_response()
+                row = rows[0]
                 evidence.append(
                     _evidence(
                         context,
                         "rds.describe_db_instances",
                         "RDS basic status",
-                        {"status": _bounded_text(row.get("DBInstanceStatus"))},
+                        {
+                            "database": database,
+                            "status": _required_string(row, "DBInstanceStatus"),
+                        },
                     )
                 )
         return tuple(evidence)
@@ -317,11 +357,35 @@ def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _integer(mapping: object, key: str) -> int:
-    if not isinstance(mapping, dict):
-        return 0
+def _required_integer(mapping: dict[str, Any], key: str) -> int:
     value = mapping.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    if not isinstance(value, int) or isinstance(value, bool):
+        _invalid_response()
+    return value
+
+
+def _required_string(mapping: dict[str, Any], key: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value:
+        _invalid_response()
+    return value
+
+
+def _required_mappings(mapping: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = mapping.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        _invalid_response()
+    return cast(list[dict[str, Any]], value)
+
+
+def _require_no_failures(response: dict[str, Any]) -> None:
+    failures = response.get("failures", [])
+    if not isinstance(failures, list) or failures:
+        _invalid_response()
+
+
+def _invalid_response() -> NoReturn:
+    raise CollectorError("invalid_aws_response", "bounded AWS response was invalid")
 
 
 def _bounded_text(value: object) -> str:

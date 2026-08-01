@@ -102,7 +102,16 @@ def test_alarm_target_and_all_service_health_are_normalized_and_bounded() -> Non
     target_client = RecordingClient(
         {
             "describe_services": [
-                {"services": [{"desiredCount": 1, "runningCount": 0, "pendingCount": 1}]}
+                {
+                    "services": [
+                        {
+                            "serviceName": "pilo-dev-service-01",
+                            "desiredCount": 1,
+                            "runningCount": 0,
+                            "pendingCount": 1,
+                        }
+                    ]
+                }
             ]
         }
     )
@@ -113,7 +122,12 @@ def test_alarm_target_and_all_service_health_are_normalized_and_bounded() -> Non
             "describe_services": [
                 {
                     "services": [
-                        {"serviceName": f"pilo-dev-service-{index:02d}", "runningCount": 1}
+                        {
+                            "serviceName": f"pilo-dev-service-{index:02d}",
+                            "desiredCount": 1,
+                            "runningCount": 1,
+                            "pendingCount": 0,
+                        }
                         for index in range(1, 9)
                     ]
                 }
@@ -122,7 +136,12 @@ def test_alarm_target_and_all_service_health_are_normalized_and_bounded() -> Non
     )
     all_services = AllPiloServicesCollector(all_client).collect(context())
 
-    assert target[0].data == {"desired": 1, "running": 0, "pending": 1}
+    assert target[0].data == {
+        "service": "pilo-dev-service-01",
+        "desired": 1,
+        "running": 0,
+        "pending": 1,
+    }
     assert len(all_services) == 8
     assert len(all_client.calls) == 1
     assert len(all_client.calls[0][1]["services"]) == 8
@@ -159,6 +178,8 @@ def test_stopped_tasks_and_logs_use_bounded_pages_windows_and_limits() -> None:
     assert log_calls[0]["limit"] == 100
     assert log_calls[0]["endTime"] - log_calls[0]["startTime"] == 20 * 60 * 1000
     assert len(cast(str, evidence[-1].data["message"])) == 500
+    assert evidence[-1].data["service"] == "pilo-dev-service-01"
+    assert evidence[-1].data["log_group"] == "/aws/ecs/pilo-dev-service-01"
 
 
 def test_alb_rds_and_github_collect_only_mapped_resources() -> None:
@@ -179,9 +200,85 @@ def test_alb_rds_and_github_collect_only_mapped_resources() -> None:
     github_evidence = RecentGitHubDeploymentsCollector(github).collect(context())
 
     assert alb_evidence[0].data["states"] == ["unhealthy"]
+    assert alb_evidence[0].data["target_group"] == context().services[0].target_groups[0]
     assert rds_evidence[0].data["status"] == "available"
+    assert rds_evidence[0].data["database"] == "pilo-dev-db-01"
     assert github_evidence[0].data["revision"] == "abcdef12"
+    assert github_evidence[0].data["repository"] == "synthetic-org/pilo-dev-service-01"
     assert len(alb.calls) == len(rds.calls) == len(github.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"services": []},
+        {"services": [{"desiredCount": "unknown", "runningCount": 0, "pendingCount": 0}]},
+        {"services": [], "failures": [{"reason": "MISSING"}]},
+    ],
+)
+def test_alarm_target_missing_or_malformed_response_is_failure(
+    response: dict[str, Any],
+) -> None:
+    client = RecordingClient({"describe_services": [response]})
+
+    with pytest.raises(CollectorError, match="collector failed"):
+        AlarmTargetEcsCollector(client).collect(context())
+
+
+def test_all_service_health_requires_all_eight_responses() -> None:
+    client = RecordingClient(
+        {
+            "describe_services": [
+                {
+                    "services": [
+                        {
+                            "serviceName": f"pilo-dev-service-{index:02d}",
+                            "desiredCount": 1,
+                            "runningCount": 1,
+                            "pendingCount": 0,
+                        }
+                        for index in range(1, 8)
+                    ]
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(CollectorError, match="collector failed"):
+        AllPiloServicesCollector(client).collect(context())
+
+
+def test_task_and_log_response_order_is_normalized() -> None:
+    ecs = RecordingClient(
+        {
+            "list_tasks": [{"taskArns": ["task-2", "task-1"]}],
+            "describe_tasks": [
+                {
+                    "tasks": [
+                        {"taskArn": "task-2", "stopCode": "B"},
+                        {"taskArn": "task-1", "stopCode": "A"},
+                    ]
+                }
+            ],
+        }
+    )
+    logs = RecordingClient(
+        {
+            "filter_log_events": [
+                {
+                    "events": [
+                        {"timestamp": 2, "message": "later"},
+                        {"timestamp": 1, "message": "earlier"},
+                    ]
+                }
+            ]
+        }
+    )
+
+    evidence = StoppedTasksAndLogsCollector(ecs, logs).collect(context())
+
+    assert [item.data.get("task") for item in evidence[:2]] == ["task-1", "task-2"]
+    assert [item.data.get("timestamp") for item in evidence[2:]] == [1, 2]
 
 
 def test_expected_sdk_error_becomes_sanitized_collector_error() -> None:
