@@ -1,5 +1,7 @@
 """Deterministic, fail-closed redaction for publishable incident data."""
 
+import base64
+import binascii
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -30,7 +32,11 @@ class RedactionReport:
 
 _Rule = tuple[re.Pattern[str], str, str]
 _RULES: tuple[_Rule, ...] = (
-    (re.compile(r"xox[baprs]-[A-Za-z0-9-]+"), "[REDACTED:SLACK_TOKEN]", "SLACK_TOKEN"),
+    (
+        re.compile(r"(?:xox[baprs]|xapp)-[A-Za-z0-9-]+"),
+        "[REDACTED:SLACK_TOKEN]",
+        "SLACK_TOKEN",
+    ),
     (
         re.compile(r"(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+"),
         "[REDACTED:GITHUB_TOKEN]",
@@ -58,7 +64,7 @@ _RULES: tuple[_Rule, ...] = (
         re.compile(
             r"(?i)([?&](?:access[_-]?token|client[_-]?secret|refresh[_-]?token|"
             r"id[_-]?token|auth[_-]?token|x[_-]?api[_-]?key|api[_-]?key|token|"
-            r"secret|password)=)"
+            r"aws[_-]?secret[_-]?access[_-]?key|secret|password|passwd)=)"
             r"(?!\[REDACTED:QUERY_CREDENTIAL\])[^&#\s,;]+"
         ),
         r"\1[REDACTED:QUERY_CREDENTIAL]",
@@ -341,8 +347,24 @@ def _is_sensitive_key(value: str) -> bool:
 
 
 def _looks_like_authorization_credential(scheme: str, credential: str) -> bool:
-    if len(credential) < 10:
-        return False
     if scheme.casefold() == "basic":
-        return len(credential) >= 12 and bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", credential))
-    return any(not char.isalpha() for char in credential)
+        return _is_basic_userinfo(credential)
+    if not re.fullmatch(r"[A-Za-z0-9\-._~+/]+={0,}", credential):
+        return False
+    return len(credential) >= 16 or (
+        len(credential) >= 10 and any(not char.isalpha() for char in credential)
+    )
+
+
+def _is_basic_userinfo(credential: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", credential):
+        return False
+    unpadded = credential.rstrip("=")
+    if len(unpadded) % 4 == 1:
+        return False
+    padded = unpadded + "=" * (-len(unpadded) % 4)
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return b":" in decoded

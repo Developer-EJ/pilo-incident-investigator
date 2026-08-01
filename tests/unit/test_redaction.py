@@ -98,6 +98,7 @@ def _safe_bundle() -> IncidentBundle:
     ("secret", "category"),
     [
         ("xoxb-1234567890-secret", "SLACK_TOKEN"),
+        ("xapp-1-A1234567890-opaque", "SLACK_TOKEN"),
         ("ghp_abcdefghijklmnopqrstuvwxyz123456", "GITHUB_TOKEN"),
         ("github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz", "GITHUB_TOKEN"),
         ("password=hunter2", "CREDENTIAL_ASSIGNMENT"),
@@ -109,6 +110,11 @@ def _safe_bundle() -> IncidentBundle:
         ("https://hooks.slack.com/services/T000/B000/WEBHOOK", "WEBHOOK_URL"),
         ("https://example.invalid/path?access_token=query-secret", "QUERY_CREDENTIAL"),
         ("https://example.invalid/path?clientSecret=query-secret", "QUERY_CREDENTIAL"),
+        ("https://example.invalid/path?passwd=query-secret", "QUERY_CREDENTIAL"),
+        (
+            "https://example.invalid/path?awsSecretAccessKey=query-secret",
+            "QUERY_CREDENTIAL",
+        ),
         ('password="hunter two"', "CREDENTIAL_ASSIGNMENT"),
     ],
 )
@@ -155,6 +161,32 @@ def test_query_token_is_counted_once_and_remains_idempotent() -> None:
     redacted_again, second_report = Redactor().redact_text(redacted)
 
     assert report.replacements == 1
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "category"),
+    [
+        ("xapp-1-A1234567890-opaque", "SLACK_TOKEN"),
+        ("https://example.invalid/?passwd=opaque-value", "QUERY_CREDENTIAL"),
+        (
+            "https://example.invalid/?awsSecretAccessKey=opaque-value",
+            "QUERY_CREDENTIAL",
+        ),
+        (
+            "https://example.invalid/?aws_secret_access_key=opaque-value",
+            "QUERY_CREDENTIAL",
+        ),
+    ],
+)
+def test_additional_credential_shapes_are_counted_once_and_idempotent(
+    value: str, category: str
+) -> None:
+    redacted, report = Redactor().redact_text(value)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert report.categories == ((category, 1),)
     assert redacted_again == redacted
     assert second_report.replacements == 0
 
@@ -255,7 +287,16 @@ def test_contextual_credential_assignment_redacts_quoted_value() -> None:
     assert report.categories == (("CREDENTIAL_ASSIGNMENT", 1),)
 
 
-@pytest.mark.parametrize("text", ["basic snapshot status", "bearer task count"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "basic snapshot status",
+        "Basic investigation workflow",
+        "bearer task count",
+        "bearer snapshot status",
+        "bearer investigation workflow",
+    ],
+)
 def test_authorization_scheme_words_in_normal_text_are_not_redacted(text: str) -> None:
     redacted, report = Redactor().redact_text(text)
 
@@ -268,6 +309,7 @@ def test_authorization_scheme_words_in_normal_text_are_not_redacted(text: str) -
     [
         "Bearer abc.def.ghi",
         "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        "Bearer abcdefghijklmnopqrstuvwxyz",
         "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
         "Basic dXNlcjpwYXNz",
     ],
@@ -277,6 +319,32 @@ def test_standalone_credential_shaped_authorization_is_redacted(text: str) -> No
 
     assert text not in redacted
     assert report.categories == (("AUTHORIZATION", 1),)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bearer abcdefghijklmnopqrstuvwxyz",
+        "Bearer abc.def.ghi",
+        "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        "Basic dXNlcjpwYXNz",
+    ],
+)
+def test_standalone_authorization_redaction_is_idempotent_and_counted_once(text: str) -> None:
+    redacted, report = Redactor().redact_text(text)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert report.categories == (("AUTHORIZATION", 1),)
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize("text", ["Basic dXNlcg==", "Basic not-valid-base64!"])
+def test_basic_without_decoded_userinfo_is_not_redacted(text: str) -> None:
+    redacted, report = Redactor().redact_text(text)
+
+    assert redacted == text
+    assert report.replacements == 0
 
 
 def test_redact_bundle_fails_closed_without_echoing_invalid_value() -> None:
