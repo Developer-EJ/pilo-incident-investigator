@@ -21,3 +21,5 @@ build/
 crash.log
 dist/
 pilo-topology.yaml
+reports/eval-*.json
+reports/eval-*.md

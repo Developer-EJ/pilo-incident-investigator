@@ -37,14 +37,5 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Check Python
-        run: make check
-
-      - name: Test runtime
-        run: make test
-
-      - name: Build deterministic Lambda artifact
-        run: make package
-
-      - name: Check Terraform without apply
-        run: make terraform-check
+      - name: Verify repository without external calls
+        run: make verify
