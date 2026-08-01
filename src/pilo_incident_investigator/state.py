@@ -79,10 +79,7 @@ class DynamoIncidentStateStore:
         _require_identifier(event_id, "event ID")
         _require_identifier(incident_id, "incident ID")
         _require_identifier(attempt_id, "attempt ID")
-        now = self._epoch_seconds()
-        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-            raise ValueError("state clock returned an invalid epoch")
-        lease_expires_at = now + _ATTEMPT_LEASE_SECONDS
+        now, lease_expires_at = self._lease_window()
         try:
             self._table.put_item(
                 Item=_new_event_item(event_id, incident_id, attempt_id, lease_expires_at),
@@ -130,16 +127,14 @@ class DynamoIncidentStateStore:
         _require_identifier(event_id, "event ID")
         _require_identifier(incident_id, "incident ID")
         attempt_id = f"legacy-{incident_id}"
-        now = self._epoch_seconds()
-        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-            raise ValueError("state clock returned an invalid epoch")
+        _, lease_expires_at = self._lease_window()
         try:
             self._table.put_item(
                 Item=_new_event_item(
                     event_id,
                     incident_id,
                     attempt_id,
-                    now + _ATTEMPT_LEASE_SECONDS,
+                    lease_expires_at,
                 ),
                 ConditionExpression="attribute_not_exists(event_id)",
             )
@@ -213,17 +208,20 @@ class DynamoIncidentStateStore:
         attempt_id = self._active_attempts.get(event_id)
         if attempt_id is None:
             return False
+        now, lease_expires_at = self._lease_window()
         try:
             self._table.update_item(
                 Key={"event_id": event_id},
-                UpdateExpression="SET #outcome = :outcome",
+                UpdateExpression=("SET #outcome = :outcome, lease_expires_at = :lease_expires_at"),
                 ConditionExpression=(
                     "attribute_exists(event_id) AND attempt_id = :attempt_id AND "
-                    "processing_status = :processing"
+                    "processing_status = :processing AND lease_expires_at >= :now"
                 ),
                 ExpressionAttributeNames={"#outcome": attribute},
                 ExpressionAttributeValues={
                     ":attempt_id": attempt_id,
+                    ":lease_expires_at": lease_expires_at,
+                    ":now": now,
                     ":outcome": value,
                     ":processing": ProcessingStatus.PROCESSING.value,
                 },
@@ -232,8 +230,7 @@ class DynamoIncidentStateStore:
             if _is_conditional_failure(error):
                 return False
             raise
-        self._advance(event_id, checkpoint)
-        return True
+        return self._advance(event_id, checkpoint)
 
     def _mark_processing_status(
         self,
@@ -245,18 +242,23 @@ class DynamoIncidentStateStore:
     ) -> bool:
         _require_identifier(event_id, "event ID")
         _require_identifier(attempt_id, "attempt ID")
+        now, lease_expires_at = self._lease_window()
         try:
             self._table.update_item(
                 Key={"event_id": event_id},
-                UpdateExpression="SET processing_status = :next_status",
+                UpdateExpression=(
+                    "SET processing_status = :next_status, lease_expires_at = :lease_expires_at"
+                ),
                 ConditionExpression=(
                     "attribute_exists(event_id) AND attempt_id = :attempt_id AND "
-                    "processing_status = :expected_status"
+                    "processing_status = :expected_status AND lease_expires_at >= :now"
                 ),
                 ExpressionAttributeValues={
                     ":attempt_id": attempt_id,
                     ":expected_status": expected.value,
+                    ":lease_expires_at": lease_expires_at,
                     ":next_status": next_status.value,
+                    ":now": now,
                 },
             )
         except ClientError as error:
@@ -279,21 +281,26 @@ class DynamoIncidentStateStore:
         attempt_id = self._active_attempts.get(event_id)
         if attempt_id is None:
             return False
+        now, lease_expires_at = self._lease_window()
         try:
             self._table.update_item(
                 Key={"event_id": event_id},
                 UpdateExpression=(
-                    "SET #checkpoint = :next_checkpoint, checkpoint_rank = :next_rank"
+                    "SET #checkpoint = :next_checkpoint, checkpoint_rank = :next_rank, "
+                    "lease_expires_at = :lease_expires_at"
                 ),
                 ConditionExpression=(
                     "attribute_exists(event_id) AND attempt_id = :attempt_id AND "
-                    "processing_status = :processing AND checkpoint_rank < :next_rank"
+                    "processing_status = :processing AND lease_expires_at >= :now AND "
+                    "checkpoint_rank < :next_rank"
                 ),
                 ExpressionAttributeNames={"#checkpoint": "checkpoint"},
                 ExpressionAttributeValues={
                     ":attempt_id": attempt_id,
+                    ":lease_expires_at": lease_expires_at,
                     ":next_checkpoint": checkpoint.value,
                     ":next_rank": _CHECKPOINT_RANK[checkpoint],
+                    ":now": now,
                     ":processing": ProcessingStatus.PROCESSING.value,
                 },
             )
@@ -306,12 +313,19 @@ class DynamoIncidentStateStore:
                     return (
                         item.get("attempt_id") == attempt_id
                         and item.get("processing_status") == ProcessingStatus.PROCESSING.value
+                        and (_dynamo_integer(item.get("lease_expires_at")) or -1) >= now
                         and rank is not None
                         and rank >= _CHECKPOINT_RANK[checkpoint]
                     )
                 return False
             raise
         return True
+
+    def _lease_window(self) -> tuple[int, int]:
+        now = self._epoch_seconds()
+        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+            raise ValueError("state clock returned an invalid epoch")
+        return now, now + _ATTEMPT_LEASE_SECONDS
 
 
 def _require_identifier(value: str, field_name: str) -> None:

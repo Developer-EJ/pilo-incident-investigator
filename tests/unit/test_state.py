@@ -52,29 +52,35 @@ class InMemoryConditionalTable:
                 item is None
                 or item["attempt_id"] != values[":attempt_id"]
                 or item["processing_status"] != values[":expected_status"]
+                or cast(int, item["lease_expires_at"]) < cast(int, values[":now"])
             ):
                 raise conditional_failure()
             item["processing_status"] = values[":next_status"]
+            item["lease_expires_at"] = values[":lease_expires_at"]
             return {}
         if ":outcome" in values:
             if (
                 item is None
                 or item["attempt_id"] != values[":attempt_id"]
                 or item["processing_status"] != values[":processing"]
+                or cast(int, item["lease_expires_at"]) < cast(int, values[":now"])
             ):
                 raise conditional_failure()
             attribute = kwargs["ExpressionAttributeNames"]["#outcome"]
             item[attribute] = values[":outcome"]
+            item["lease_expires_at"] = values[":lease_expires_at"]
             return {}
         if (
             item is None
             or item["attempt_id"] != values[":attempt_id"]
             or item["processing_status"] != values[":processing"]
+            or cast(int, item["lease_expires_at"]) < cast(int, values[":now"])
             or cast(int, item["checkpoint_rank"]) >= cast(int, values[":next_rank"])
         ):
             raise conditional_failure()
         item["checkpoint"] = values[":next_checkpoint"]
         item["checkpoint_rank"] = values[":next_rank"]
+        item["lease_expires_at"] = values[":lease_expires_at"]
         return {}
 
     def get_item(self, **kwargs: Any) -> dict[str, Any]:
@@ -145,7 +151,8 @@ def test_checkpoints_only_move_forward_and_retries_are_idempotent() -> None:
         call["ConditionExpression"]
         == (
             "attribute_exists(event_id) AND attempt_id = :attempt_id AND "
-            "processing_status = :processing AND checkpoint_rank < :next_rank"
+            "processing_status = :processing AND lease_expires_at >= :now AND "
+            "checkpoint_rank < :next_rank"
         )
         for call in rank_calls
     )
@@ -304,3 +311,49 @@ def test_expired_attempt_cannot_write_publisher_outcomes_after_resume() -> None:
     assert resumed.disposition is ClaimDisposition.RESUMED
     assert old_store.mark_bundle_stored("evt-001") is False
     assert new_store.mark_bundle_stored("evt-001") is True
+
+
+def test_takeover_between_outcome_and_checkpoint_fails_the_old_attempt() -> None:
+    class TakeoverAfterOutcomeTable(InMemoryConditionalTable):
+        def update_item(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().update_item(**kwargs)
+            if ":outcome" in kwargs["ExpressionAttributeValues"]:
+                item = self.items[kwargs["Key"]["event_id"]]
+                item["attempt_id"] = "attempt-new"
+                item["processing_status"] = ProcessingStatus.PROCESSING.value
+                item["lease_expires_at"] = 2_801
+            return response
+
+    table = TakeoverAfterOutcomeTable()
+    old_store = DynamoIncidentStateStore(table, epoch_seconds=lambda: 1_000)
+    old_store.begin_event("evt-001", "inc-abc", "attempt-old")
+
+    assert old_store.mark_bundle_stored("evt-001") is False
+    assert table.items["evt-001"]["bundle_stored"] is True
+    assert table.items["evt-001"]["checkpoint"] == Checkpoint.CLAIMED.value
+    assert table.items["evt-001"]["attempt_id"] == "attempt-new"
+
+
+def test_expired_attempt_cannot_checkpoint_or_complete_without_takeover() -> None:
+    table = InMemoryConditionalTable()
+    now = [1_000]
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: now[0])
+    store.begin_event("evt-001", "inc-abc", "attempt-old")
+    now[0] = 1_901
+
+    assert store.mark_bundle_stored("evt-001") is False
+    assert store.mark_complete("evt-001", "attempt-old") is False
+    assert table.items["evt-001"]["bundle_stored"] is False
+    assert table.items["evt-001"]["checkpoint"] == Checkpoint.CLAIMED.value
+    assert table.items["evt-001"]["processing_status"] == ProcessingStatus.PROCESSING.value
+
+
+def test_current_attempt_checkpoint_renews_lease() -> None:
+    table = InMemoryConditionalTable()
+    now = [1_000]
+    store = DynamoIncidentStateStore(table, epoch_seconds=lambda: now[0])
+    store.begin_event("evt-001", "inc-abc", "attempt-a")
+    now[0] = 1_800
+
+    assert store.mark_snapshot_complete("evt-001") is True
+    assert table.items["evt-001"]["lease_expires_at"] == 2_700
