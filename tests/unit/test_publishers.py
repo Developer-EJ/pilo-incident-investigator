@@ -573,6 +573,74 @@ def test_unapproved_redaction_sentinels_fail_before_every_sink(bundle_bytes: byt
 
 
 @pytest.mark.parametrize(
+    "embedded_message",
+    [
+        '{"password":123456}',
+        '{"password":true}',
+        '{"password":null}',
+        '{"password":["opaque-secret"]}',
+        '{"password":{"part":"opaque-secret"}}',
+        '{"client secret":"opaque-secret"}',
+        r"{\"password\":123456}",
+        '{"outer":"{\\"password\\":123456}"}',
+    ],
+)
+def test_embedded_structured_sensitive_values_fail_before_every_sink(
+    embedded_message: str,
+) -> None:
+    bundle_bytes = json.dumps(
+        {"message": embedded_message},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError) as captured:
+        payload(bundle_bytes=bundle_bytes)
+
+    assert calls == []
+    assert state.calls == []
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert "123456" not in rendered
+    assert "opaque-secret" not in rendered
+
+
+@pytest.mark.parametrize("wrapper", ["secret_rotation_metadata", "secrets_rotation_metadata"])
+def test_supported_secret_rotation_metadata_wrapper_remains_publishable(wrapper: str) -> None:
+    safe_bundle = json.dumps(
+        {
+            wrapper: {
+                "last_rotated_at": "2026-01-01T00:00:00Z",
+                "rotation_enabled": True,
+            }
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+    publication = payload(bundle_bytes=safe_bundle)
+
+    assert publication.bundle_bytes == safe_bundle
+
+
+def test_rotation_metadata_wrapper_with_nested_password_fails_before_s3() -> None:
+    bundle_bytes = b'{"secret_rotation_metadata":{"password":"opaque-secret"}}'
+    calls: list[str] = []
+    state = RecordingState()
+    publisher(calls, state=state)
+
+    with pytest.raises(ValueError):
+        payload(bundle_bytes=bundle_bytes)
+
+    assert calls == []
+    assert state.calls == []
+
+
+@pytest.mark.parametrize(
     "bundle_bytes",
     [
         b'{"value":NaN}',
@@ -602,6 +670,10 @@ def test_nonfinite_json_numbers_are_rejected_before_every_sink(bundle_bytes: byt
         "<!-- incident-id:attacker -->\nNoncanonical marker",
         "<!-- incident-id -->\nMarker without value",
         "<!--  InCiDeNt - Id : attacker  -->\nNormalized marker",
+        "<!-- incident-id:attacker",
+        "<!-- note incident-id:attacker -->",
+        "<!-- incident-id = attacker -->",
+        "<!--  note InCiDeNt - Id = attacker  -->",
     ],
 )
 def test_issue_markdown_rejects_hidden_incident_marker_before_every_sink(
@@ -623,6 +695,12 @@ def test_unrelated_html_comment_remains_publishable_issue_markdown() -> None:
     publication = payload(issue_markdown="<!-- internal note -->\n## Safe Incident Brief")
 
     assert publication.issue_markdown.startswith("<!-- internal note -->")
+
+
+def test_visible_incident_id_prose_outside_comments_remains_publishable() -> None:
+    publication = payload(issue_markdown="Investigate incident-id:attacker as visible prose")
+
+    assert publication.issue_markdown.endswith("visible prose")
 
 
 def test_publication_payload_repr_hides_publishable_content() -> None:

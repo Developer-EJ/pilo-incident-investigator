@@ -605,3 +605,71 @@ def test_unapproved_redaction_sentinel_is_not_idempotently_trusted(sentinel: str
 
     assert redacted == {"clientSecret": {"nested": "[REDACTED:SENSITIVE_FIELD]"}}
     assert report.replacements == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '{"password":123456}',
+        '{"password":true}',
+        '{"password":null}',
+        '{"password":{"part":7}}',
+        '{"password":["opaque-secret",7]}',
+        r'{"password":123456}',
+        '{"outer":"{\\"password\\":123456}"}',
+    ],
+)
+def test_embedded_json_non_string_sensitive_values_fail_closed(message: str) -> None:
+    value: JsonValue = {"message": message}
+
+    with pytest.raises(UnsafeBundleError) as captured:
+        Redactor().redact_json(value)
+
+    assert "123456" not in repr(captured.value)
+    assert "opaque-secret" not in repr(captured.value)
+
+
+def test_embedded_json_spaced_sensitive_key_is_redacted() -> None:
+    value: JsonValue = {"message": '{"client secret":"opaque-secret"}'}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)
+
+
+def test_non_json_prose_with_braced_example_is_not_parsed_or_redacted() -> None:
+    value: JsonValue = {"message": 'prefix {"password":123456} suffix'}
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize("wrapper", ["secret_rotation_metadata", "secrets_rotation_metadata"])
+def test_secret_rotation_metadata_wrapper_is_narrowly_safe(wrapper: str) -> None:
+    value: JsonValue = {
+        wrapper: {
+            "last_rotated_at": "2026-01-01T00:00:00Z",
+            "rotation_enabled": True,
+        }
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted == value
+    assert report.replacements == 0
+
+
+def test_secret_rotation_metadata_wrapper_does_not_exempt_nested_credentials() -> None:
+    value: JsonValue = {
+        "secret_rotation_metadata": {"password": "opaque-secret"},
+    }
+
+    redacted, report = Redactor().redact_json(value)
+
+    assert redacted != value
+    assert report.replacements == 1
+    assert "opaque-secret" not in repr(redacted)
