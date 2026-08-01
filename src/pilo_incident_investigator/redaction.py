@@ -60,16 +60,6 @@ _RULES: tuple[_Rule, ...] = (
         "[REDACTED:WEBHOOK_URL]",
         "WEBHOOK_URL",
     ),
-    (
-        re.compile(
-            r"(?i)([?&](?:access[_-]?token|client[_-]?secret|refresh[_-]?token|"
-            r"id[_-]?token|auth[_-]?token|x[_-]?api[_-]?key|api[_-]?key|token|"
-            r"aws[_-]?secret[_-]?access[_-]?key|secret|password|passwd)=)"
-            r"(?!\[REDACTED:QUERY_CREDENTIAL\])[^&#\s,;]+"
-        ),
-        r"\1[REDACTED:QUERY_CREDENTIAL]",
-        "QUERY_CREDENTIAL",
-    ),
 )
 _SENSITIVE_EXACT_KEYS = frozenset(
     {
@@ -97,10 +87,15 @@ _STANDALONE_AUTHORIZATION = re.compile(
     r"(?i)\b(?P<scheme>bearer|basic)\s+"
     r"(?P<credential>(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+)"
 )
+_QUERY_CREDENTIAL = re.compile(
+    r"(?i)(?P<prefix>[?&])(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})="
+    r"(?P<value>(?!\[REDACTED:)[^&#\s,;]+)"
+)
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})\s*[=:]\s*"
     r"(?![A-Za-z][A-Za-z0-9_.-]{0,127}\s*[=:])"
-    r"(?P<value>(?!\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+))"
+    r"""(?P<value>(?!\[REDACTED:)(?:"(?:\\.|[^"\\\r\n])*"|"""
+    r"'(?:\\.|[^'\\\r\n])*'|[^\s,;]+))"
 )
 _SENSITIVE_SINGLE_TOKENS = frozenset(
     {"password", "passwd", "secret", "token", "authorization", "credential", "credentials"}
@@ -259,6 +254,7 @@ class Redactor:
         for pattern, replacement, category in _RULES:
             redacted, replacements = pattern.subn(replacement, redacted)
             counts[category] += replacements
+        redacted = self._redact_query_credentials(redacted, counts)
         redacted = self._redact_standalone_authorization(redacted, counts)
         redacted = self._redact_assignments(redacted, counts)
         return redacted
@@ -273,6 +269,15 @@ class Redactor:
             return "[REDACTED:AUTHORIZATION]"
 
         return _STANDALONE_AUTHORIZATION.sub(replace, value)
+
+    def _redact_query_credentials(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if not _is_sensitive_key(match.group("key")):
+                return match.group(0)
+            counts["QUERY_CREDENTIAL"] += 1
+            return f"{match.group('prefix')}{match.group('key')}=[REDACTED:QUERY_CREDENTIAL]"
+
+        return _QUERY_CREDENTIAL.sub(replace, value)
 
     def _redact_assignments(self, value: str, counts: Counter[str]) -> str:
         def replace(match: re.Match[str]) -> str:
@@ -351,7 +356,7 @@ def _looks_like_authorization_credential(scheme: str, credential: str) -> bool:
         return _is_basic_userinfo(credential)
     if not re.fullmatch(r"[A-Za-z0-9\-._~+/]+={0,}", credential):
         return False
-    return len(credential) >= 16 or (
+    return len(credential) >= 14 or (
         len(credential) >= 10 and any(not char.isalpha() for char in credential)
     )
 

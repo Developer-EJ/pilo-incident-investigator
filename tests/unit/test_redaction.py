@@ -288,6 +288,20 @@ def test_contextual_credential_assignment_redacts_quoted_value() -> None:
 
 
 @pytest.mark.parametrize(
+    "value",
+    [r'password="hunter\"tail"', r"secret='hunter\'tail'"],
+)
+def test_escaped_quoted_assignment_removes_the_entire_value(value: str) -> None:
+    redacted, report = Redactor().redact_text(value)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert redacted == f"{value.split('=', 1)[0]}=[REDACTED:CREDENTIAL]"
+    assert report.categories == (("CREDENTIAL_ASSIGNMENT", 1),)
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "basic snapshot status",
@@ -295,6 +309,7 @@ def test_contextual_credential_assignment_redacts_quoted_value() -> None:
         "bearer task count",
         "bearer snapshot status",
         "bearer investigation workflow",
+        "Bearer abcdefghijklm",
     ],
 )
 def test_authorization_scheme_words_in_normal_text_are_not_redacted(text: str) -> None:
@@ -310,6 +325,8 @@ def test_authorization_scheme_words_in_normal_text_are_not_redacted(text: str) -
         "Bearer abc.def.ghi",
         "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
         "Bearer abcdefghijklmnopqrstuvwxyz",
+        "Bearer abcdefghijklmn",
+        "Bearer abcdefghijklmno",
         "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
         "Basic dXNlcjpwYXNz",
     ],
@@ -344,6 +361,42 @@ def test_basic_without_decoded_userinfo_is_not_redacted(text: str) -> None:
     redacted, report = Redactor().redact_text(text)
 
     assert redacted == text
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "dbPassword",
+        "service-secret",
+        "github_token",
+        "SecretString",
+        "apiKeyValue",
+        "awsSecretAccessKey",
+    ],
+)
+def test_query_uses_sensitive_key_tokenization(key: str) -> None:
+    value = f"https://example.invalid/path?{key}=opaque-value"
+
+    redacted, report = Redactor().redact_text(value)
+    redacted_again, second_report = Redactor().redact_text(redacted)
+
+    assert redacted == f"https://example.invalid/path?{key}=[REDACTED:QUERY_CREDENTIAL]"
+    assert report.categories == (("QUERY_CREDENTIAL", 1),)
+    assert redacted_again == redacted
+    assert second_report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["status", "api_version", "private_subnet", "refresh_interval", "secretary"],
+)
+def test_query_leaves_normal_key_context_unchanged(key: str) -> None:
+    value = f"https://example.invalid/path?{key}=ordinary-value"
+
+    redacted, report = Redactor().redact_text(value)
+
+    assert redacted == value
     assert report.replacements == 0
 
 
