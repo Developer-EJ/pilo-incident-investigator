@@ -1,6 +1,7 @@
 import json
 import traceback
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -27,6 +28,23 @@ class RecordingTransport:
     ) -> HttpResponse:
         self.calls.append((method, url, headers, body, timeout_seconds))
         return self.response
+
+
+class SequencedTransport(RecordingTransport):
+    def __init__(self, responses: list[HttpResponse]) -> None:
+        super().__init__(responses[0])
+        self.responses = responses
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        timeout_seconds: float,
+    ) -> HttpResponse:
+        self.calls.append((method, url, headers, body, timeout_seconds))
+        return self.responses[len(self.calls) - 1]
 
 
 def response_body() -> bytes:
@@ -120,7 +138,16 @@ def test_client_repr_never_contains_token() -> None:
 
 @pytest.mark.parametrize(
     "repository",
-    ["not-a-pair", "owner/repo/extra", "owner/..", "../repo", "owner/.", "./repo"],
+    [
+        "not-a-pair",
+        "owner/repo/extra",
+        "owner/..",
+        "../repo",
+        "owner/.",
+        "./repo",
+        f"{'o' * 101}/repo",
+        f"owner/{'r' * 101}",
+    ],
 )
 def test_invalid_repository_is_rejected_before_http(repository: str) -> None:
     transport = RecordingTransport(HttpResponse(status=200, body=b"[]"))
@@ -199,3 +226,166 @@ def test_transport_error_does_not_expose_remote_message() -> None:
         )
 
     assert sensitive_marker not in "".join(traceback.format_exception(captured.value))
+
+
+def test_find_issue_searches_open_and_closed_and_verifies_exact_marker_line() -> None:
+    open_response = HttpResponse(
+        status=200,
+        body=json.dumps(
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [
+                    {
+                        "body": "prefix <!-- incident-id:inc-123 --> suffix",
+                        "html_url": "https://github.com/synthetic-org/incidents/issues/3",
+                    }
+                ],
+            }
+        ).encode(),
+    )
+    closed_response = HttpResponse(
+        status=200,
+        body=json.dumps(
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [
+                    {
+                        "body": "<!-- incident-id:inc-123 -->\n## Incident Brief",
+                        "html_url": "https://github.com/synthetic-org/incidents/issues/4",
+                    }
+                ],
+            }
+        ).encode(),
+    )
+    transport = SequencedTransport([open_response, closed_response])
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    issue_url = client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123")
+
+    assert issue_url == "https://github.com/synthetic-org/incidents/issues/4"
+    assert len(transport.calls) == 2
+    states = []
+    for method, url, _, body, timeout in transport.calls:
+        assert method == "GET"
+        assert urlparse(url).path == "/search/issues"
+        query = parse_qs(urlparse(url).query)
+        assert query["per_page"] == ["100"]
+        assert "repo:synthetic-org/incidents" in query["q"][0]
+        assert "is:issue" in query["q"][0]
+        assert '"incident-id:inc-123" in:body' in query["q"][0]
+        states.append("open" if "state:open" in query["q"][0] else "closed")
+        assert body is None
+        assert timeout == 5.0
+    assert states == ["open", "closed"]
+
+
+def test_find_issue_returns_none_when_search_only_has_loose_substring() -> None:
+    response = HttpResponse(
+        status=200,
+        body=json.dumps(
+            {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [
+                    {
+                        "body": "prefix <!-- incident-id:inc-123 --> suffix",
+                        "html_url": "https://github.com/synthetic-org/incidents/issues/3",
+                    }
+                ],
+            }
+        ).encode(),
+    )
+    client = GitHubClient("synthetic-token", transport=SequencedTransport([response, response]))
+
+    assert client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123") is None
+
+
+def test_create_incident_issue_prefixes_exact_marker_and_returns_validated_url() -> None:
+    response = HttpResponse(
+        status=201,
+        body=json.dumps(
+            {
+                "number": 7,
+                "html_url": "https://github.com/synthetic-org/incidents/issues/7",
+            }
+        ).encode(),
+    )
+    transport = RecordingTransport(response)
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    issue_url = client.create_incident_issue(
+        "synthetic-org/incidents", "inc-123", "## Incident Brief\n\nSafe."
+    )
+
+    assert issue_url == "https://github.com/synthetic-org/incidents/issues/7"
+    method, url, headers, body, timeout = transport.calls[0]
+    assert method == "POST"
+    assert url == "https://api.github.com/repos/synthetic-org/incidents/issues"
+    assert headers["Authorization"] == "Bearer synthetic-token"
+    assert json.loads(body or b"") == {
+        "title": "Incident inc-123",
+        "body": "<!-- incident-id:inc-123 -->\n## Incident Brief\n\nSafe.",
+    }
+    assert timeout == 5.0
+
+
+@pytest.mark.parametrize("incident_id", ["", "../escape", "inc/123", "inc-123\n-->"])
+def test_incident_issue_methods_reject_unsafe_incident_id_before_http(
+    incident_id: str,
+) -> None:
+    transport = RecordingTransport(HttpResponse(status=200, body=b"{}"))
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    with pytest.raises(ValueError, match="incident ID"):
+        client.find_issue_by_incident_id("synthetic-org/incidents", incident_id)
+    with pytest.raises(ValueError, match="incident ID"):
+        client.create_incident_issue("synthetic-org/incidents", incident_id, "safe")
+
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        HttpResponse(status=500, body=b"SENSITIVE-RESPONSE-MARKER"),
+        HttpResponse(status=200, body=b"not-json"),
+        HttpResponse(status=200, body=b"x" * 1_000_001),
+        HttpResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "total_count": 1,
+                    "incomplete_results": False,
+                    "items": [
+                        {
+                            "body": "<!-- incident-id:inc-123 -->",
+                            "html_url": "https://attacker.invalid/leak",
+                        }
+                    ],
+                }
+            ).encode(),
+        ),
+    ],
+)
+def test_issue_search_response_errors_are_sanitized(response: HttpResponse) -> None:
+    client = GitHubClient("synthetic-token", transport=RecordingTransport(response))
+
+    with pytest.raises(IntegrationError) as captured:
+        client.find_issue_by_incident_id("synthetic-org/incidents", "inc-123")
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert "SENSITIVE-RESPONSE-MARKER" not in rendered
+    assert "synthetic-token" not in rendered
+    assert "attacker.invalid" not in rendered
+
+
+def test_issue_creation_rejects_oversized_body_before_http() -> None:
+    transport = RecordingTransport(HttpResponse(status=201, body=b"{}"))
+    client = GitHubClient("synthetic-token", transport=transport)
+
+    with pytest.raises(ValueError, match="Issue Markdown"):
+        client.create_incident_issue("synthetic-org/incidents", "inc-123", "x" * 65_001)
+
+    assert transport.calls == []

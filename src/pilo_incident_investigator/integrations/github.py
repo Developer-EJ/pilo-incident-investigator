@@ -10,10 +10,13 @@ from urllib.request import Request, urlopen
 
 MAX_DEPLOYMENTS = 10
 MAX_CHANGED_FILES = 100
+MAX_ISSUE_MARKDOWN_CHARS = 65_000
+MAX_ISSUE_SEARCH_RESULTS = 100
 MAX_RESPONSE_BYTES = 1_000_000
 REQUEST_TIMEOUT_SECONDS = 5.0
 GITHUB_API_BASE = "https://api.github.com"
-_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+_INCIDENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 class IntegrationError(RuntimeError):
@@ -152,6 +155,81 @@ class GitHubClient:
             raise IntegrationError("GitHub response was invalid") from None
         return files[:limit]
 
+    def find_issue_by_incident_id(self, repository: str, incident_id: str) -> str | None:
+        """Find an open or closed Issue containing the exact incident marker line."""
+        _require_repository(repository)
+        _require_incident_id(incident_id)
+        marker = f"<!-- incident-id:{incident_id} -->"
+        matches: list[str] = []
+        for state in ("open", "closed"):
+            query = urlencode(
+                {
+                    "q": (
+                        f"repo:{repository} is:issue state:{state} "
+                        f'"incident-id:{incident_id}" in:body'
+                    ),
+                    "per_page": MAX_ISSUE_SEARCH_RESULTS,
+                }
+            )
+            response = self._request("GET", f"{self._api_base}/search/issues?{query}", None)
+            if response.status != 200:
+                raise IntegrationError("GitHub request failed")
+            try:
+                raw = json.loads(response.body)
+                items = _parse_search_items(raw, repository)
+            except (UnicodeError, ValueError, TypeError, KeyError):
+                raise IntegrationError("GitHub response was invalid") from None
+            for body, issue_url in items:
+                if marker in body.splitlines():
+                    matches.append(issue_url)
+        return matches[0] if matches else None
+
+    def create_incident_issue(self, repository: str, incident_id: str, issue_markdown: str) -> str:
+        """Create one private incident Issue with an idempotency marker."""
+        _require_repository(repository)
+        _require_incident_id(incident_id)
+        if not isinstance(issue_markdown, str) or not (
+            1 <= len(issue_markdown) <= MAX_ISSUE_MARKDOWN_CHARS
+        ):
+            raise ValueError("Issue Markdown must be non-empty and bounded")
+        marker = f"<!-- incident-id:{incident_id} -->"
+        request_body = json.dumps(
+            {
+                "title": f"Incident {incident_id}",
+                "body": f"{marker}\n{issue_markdown}",
+            },
+            separators=(",", ":"),
+        ).encode()
+        response = self._request(
+            "POST", f"{self._api_base}/repos/{repository}/issues", request_body
+        )
+        if response.status != 201:
+            raise IntegrationError("GitHub request failed")
+        try:
+            raw = json.loads(response.body)
+            if not isinstance(raw, dict):
+                raise TypeError
+            issue_url = _require_issue_url(raw["html_url"], repository)
+        except (UnicodeError, ValueError, TypeError, KeyError):
+            raise IntegrationError("GitHub response was invalid") from None
+        return issue_url
+
+    def _request(self, method: str, url: str, body: bytes | None) -> HttpResponse:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if body is not None:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        try:
+            response = self._transport.request(method, url, headers, body, REQUEST_TIMEOUT_SECONDS)
+        except (OSError, TimeoutError):
+            raise IntegrationError("GitHub request failed") from None
+        if len(response.body) > MAX_RESPONSE_BYTES:
+            raise IntegrationError("GitHub request failed")
+        return response
+
     def __repr__(self) -> str:
         return "GitHubClient(redacted=True)"
 
@@ -196,3 +274,47 @@ def _require_repository(repository: str) -> None:
         segment in {".", ".."} for segment in segments
     ):
         raise ValueError("repository must be an owner/name pair")
+
+
+def _require_incident_id(incident_id: str) -> None:
+    if not isinstance(incident_id, str) or _INCIDENT_ID_PATTERN.fullmatch(incident_id) is None:
+        raise ValueError("incident ID must be a safe structural identifier")
+
+
+def _parse_search_items(raw: object, repository: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, dict):
+        raise TypeError
+    total_count = raw.get("total_count")
+    incomplete_results = raw.get("incomplete_results")
+    items = raw.get("items")
+    if (
+        isinstance(total_count, bool)
+        or not isinstance(total_count, int)
+        or not isinstance(incomplete_results, bool)
+        or incomplete_results
+        or not isinstance(items, list)
+        or len(items) > MAX_ISSUE_SEARCH_RESULTS
+    ):
+        raise TypeError
+    parsed: list[tuple[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise TypeError
+        body = item.get("body")
+        if not isinstance(body, str):
+            raise TypeError
+        issue_url = _require_issue_url(item.get("html_url"), repository)
+        parsed.append((body, issue_url))
+    return tuple(parsed)
+
+
+def _require_issue_url(issue_url: object, repository: str) -> str:
+    if (
+        not isinstance(issue_url, str)
+        or re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/issues/[1-9][0-9]*", issue_url
+        )
+        is None
+    ):
+        raise ValueError
+    return issue_url
