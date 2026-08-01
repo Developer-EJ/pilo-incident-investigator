@@ -18,3 +18,6 @@ fixtures:
   - {"fixture_id":"external-api-rate-limit-complete","path":"representative/external-api-rate-limit-complete.yaml","scenario":"external_api_rate_limit","variant":"complete"}
   - {"fixture_id":"external-api-rate-limit-noisy","path":"representative/external-api-rate-limit-noisy.yaml","scenario":"external_api_rate_limit","variant":"noisy"}
   - {"fixture_id":"external-api-rate-limit-partial","path":"representative/external-api-rate-limit-partial.yaml","scenario":"external_api_rate_limit","variant":"partial"}
+  - {"fixture_id":"unknown-sparse","path":"unclassified/unknown-sparse.yaml","scenario":"unknown_sparse","variant":"unknown"}
+  - {"fixture_id":"unknown-conflicting","path":"unclassified/unknown-conflicting.yaml","scenario":"unknown_conflicting","variant":"unknown"}
+  - {"fixture_id":"composite-deploy-and-backlog","path":"unclassified/composite-deploy-and-backlog.yaml","scenario":"composite_deploy_and_backlog","variant":"composite"}

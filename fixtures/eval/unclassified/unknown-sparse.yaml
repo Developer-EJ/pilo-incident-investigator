@@ -1,0 +1,34 @@
+fixture_id: "unknown-sparse"
+scenario: "unknown_sparse"
+variant: "unknown"
+alarm: {"event_id":"evt-019","alarm_arn":"arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-incident-alarm","alarm_name":"synthetic-incident-alarm","state_timestamp":"2026-01-01T00:20:00Z","detail":{"alarmName":"synthetic-incident-alarm","state":{"value":"ALARM","reason":"synthetic threshold breached: 1 >= 1","timestamp":"2026-01-01T00:20:00Z"},"previousState":{"value":"OK","reason":"synthetic metric within threshold","timestamp":"2026-01-01T00:19:00Z"},"configuration":{"metrics":[{"id":"m1","metricStat":{"metric":{"namespace":"PILO/Synthetic","name":"IncidentSignalCount","dimensions":{"Environment":"dev"}},"period":60,"stat":"Average"},"returnData":true}]}}}
+topology:
+  version: 1
+  environment: dev
+  region: ap-northeast-2
+  services:
+    - {"key":"pilo-dev-service-01","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-01","log_groups":["/aws/ecs/pilo-dev-service-01"],"target_groups":["pilo-dev-target-01"],"rds_instances":["pilo-dev-db-01"],"secrets":["pilo-dev-secret-01"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01"],"github_repository":"synthetic-org/pilo-dev-service-01"}
+    - {"key":"pilo-dev-service-02","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-02","log_groups":["/aws/ecs/pilo-dev-service-02"],"target_groups":["pilo-dev-target-02"],"rds_instances":["pilo-dev-db-02"],"secrets":["pilo-dev-secret-02"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-02"],"github_repository":"synthetic-org/pilo-dev-service-02"}
+    - {"key":"pilo-dev-service-03","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-03","log_groups":["/aws/ecs/pilo-dev-service-03"],"target_groups":["pilo-dev-target-03"],"rds_instances":["pilo-dev-db-03"],"secrets":["pilo-dev-secret-03"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-03"],"github_repository":"synthetic-org/pilo-dev-service-03"}
+    - {"key":"pilo-dev-service-04","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-04","log_groups":["/aws/ecs/pilo-dev-service-04"],"target_groups":["pilo-dev-target-04"],"rds_instances":["pilo-dev-db-04"],"secrets":["pilo-dev-secret-04"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-04"],"github_repository":"synthetic-org/pilo-dev-service-04"}
+    - {"key":"pilo-dev-service-05","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-05","log_groups":["/aws/ecs/pilo-dev-service-05"],"target_groups":["pilo-dev-target-05"],"rds_instances":["pilo-dev-db-05"],"secrets":["pilo-dev-secret-05"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-05"],"github_repository":"synthetic-org/pilo-dev-service-05"}
+    - {"key":"pilo-dev-service-06","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-06","log_groups":["/aws/ecs/pilo-dev-service-06"],"target_groups":["pilo-dev-target-06"],"rds_instances":["pilo-dev-db-06"],"secrets":["pilo-dev-secret-06"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-06"],"github_repository":"synthetic-org/pilo-dev-service-06"}
+    - {"key":"pilo-dev-service-07","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-07","log_groups":["/aws/ecs/pilo-dev-service-07"],"target_groups":["pilo-dev-target-07"],"rds_instances":["pilo-dev-db-07"],"secrets":["pilo-dev-secret-07"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-07"],"github_repository":"synthetic-org/pilo-dev-service-07"}
+    - {"key":"pilo-dev-service-08","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-08","log_groups":["/aws/ecs/pilo-dev-service-08"],"target_groups":["pilo-dev-target-08"],"rds_instances":["pilo-dev-db-08"],"secrets":["pilo-dev-secret-08"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-08"],"github_repository":"synthetic-org/pilo-dev-service-08"}
+  alarms: {}
+snapshot:
+  incident_id: "inc-b44accd2cff5bf44677a"
+  evidence: []
+  failures:
+    - {"collector":"all_pilo_services","code":"aws_api_error","detail":"bounded AWS collector request failed"}
+tool_results: {}
+expected:
+  required_evidence_ids: []
+  acceptable_direction_labels: ["request_missing_target_context"]
+  useful_tools: []
+  classification: "unclassified"
+  facts: []
+  missing_information: ["target_mapping","related_logs","target_health","pilo_service_states"]
+handoff:
+  acceptable_first_direction_labels: ["request_missing_target_context"]
+  allowed_clarification_kinds: ["request_missing_evidence"]
