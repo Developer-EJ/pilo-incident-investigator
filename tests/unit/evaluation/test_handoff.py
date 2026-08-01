@@ -2,12 +2,14 @@ from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from pilo_incident_investigator.domain import CollectorFailure, ToolRequest
 from pilo_incident_investigator.evaluation.handoff import (
     CONDITIONS,
+    HandoffActionProposal,
     HandoffClaim,
     HandoffClarification,
     HandoffCondition,
@@ -57,10 +59,10 @@ def _recording(
         tool_registry_id=tool_registry_identifier(fixture),
         output=output
         or HandoffOutput(
-            text="recorded bounded handoff output",
             first_direction_label=None,
             clarification_requests=(),
             claims=(),
+            action_proposals=(),
             tool_requests=(),
         ),
     )
@@ -182,7 +184,6 @@ def test_incident_brief_prompt_has_only_redacted_four_sections(fixture: EvalFixt
 def test_clarifications_are_counted_only_from_structured_user_context_requests() -> None:
     result = parse_handoff_output(
         HandoffOutput(
-            text="Can you provide more context?",
             first_direction_label=None,
             clarification_requests=(
                 HandoffClarification(
@@ -191,6 +192,7 @@ def test_clarifications_are_counted_only_from_structured_user_context_requests()
                 ),
             ),
             claims=(),
+            action_proposals=(),
             tool_requests=(),
         )
     )
@@ -206,10 +208,10 @@ def test_harness_rejects_direction_outside_fixture_label_vocabulary(
         fixture,
         "raw_alarm",
         HandoffOutput(
-            text="recorded bounded handoff output",
             first_direction_label="invented_direction",
             clarification_requests=(),
             claims=(),
+            action_proposals=(),
             tool_requests=(),
         ),
     )
@@ -231,10 +233,10 @@ def test_harness_accepts_a_direction_from_fixture_label_vocabulary(
         fixture,
         "raw_alarm",
         HandoffOutput(
-            text="recorded bounded handoff output",
             first_direction_label="inspect_task_memory_and_recent_change",
             clarification_requests=(),
             claims=(),
+            action_proposals=(),
             tool_requests=(),
         ),
     )
@@ -255,7 +257,6 @@ def test_unknown_sparse_remains_directionless_but_can_request_context(
     sparse = next(item for item in fixtures if item.fixture_id == "unknown-sparse")
     recordings = _recordings(fixtures)
     output = HandoffOutput(
-        text="recorded bounded request",
         first_direction_label=None,
         clarification_requests=(
             HandoffClarification(
@@ -264,6 +265,7 @@ def test_unknown_sparse_remains_directionless_but_can_request_context(
             ),
         ),
         claims=(),
+        action_proposals=(),
         tool_requests=(),
     )
     recordings[(sparse.fixture_id, "raw_alarm")] = _recording(sparse, "raw_alarm", output)
@@ -287,13 +289,12 @@ def test_recorded_tool_calls_use_fixture_registry_and_keep_the_six_call_budget(
     request = next(iter(fixture.tool_results.values())).request
     recordings = _recordings(fixtures)
     output = HandoffOutput(
-        text="recorded bounded tool lookup",
         first_direction_label="inspect_task_memory_and_recent_change",
         clarification_requests=(),
         claims=(),
+        action_proposals=(),
         tool_requests=(request,),
     )
-    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm", output)
     recordings[(fixture.fixture_id, "incident_brief")] = _recording(
         fixture, "incident_brief", output
     )
@@ -305,10 +306,13 @@ def test_recorded_tool_calls_use_fixture_registry_and_keep_the_six_call_budget(
 
     raw, brief = harness.run_pair(fixture)
 
-    assert raw.additional_tool_calls == brief.additional_tool_calls == 1
+    assert raw.additional_tool_calls == 0
+    assert brief.additional_tool_calls == 1
 
     too_many = replace(output, tool_requests=(request,) * 7)
-    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm", too_many)
+    recordings[(fixture.fixture_id, "incident_brief")] = _recording(
+        fixture, "incident_brief", too_many
+    )
     budgeted_harness = build_offline_handoff_harness(
         model_id=MODEL_ID,
         prompt_budget=PROMPT_BUDGET,
@@ -322,13 +326,13 @@ def test_unsupported_claims_require_available_evidence(fixture: EvalFixture) -> 
     evidence_id = fixture.snapshot.evidence[0].evidence_id
     result = parse_handoff_output(
         HandoffOutput(
-            text="recorded claims",
             first_direction_label=None,
             clarification_requests=(),
             claims=(
                 HandoffClaim("supported observation", (evidence_id,)),
                 HandoffClaim("unsupported observation", ("E-not-present",)),
             ),
+            action_proposals=(),
             tool_requests=(),
         ),
         available_evidence_ids={evidence_id},
@@ -349,13 +353,15 @@ def test_recording_rejects_unrecorded_tool_request(
     )
     recordings = _recordings(fixtures)
     output = HandoffOutput(
-        text="recorded bounded tool lookup",
         first_direction_label="inspect_task_memory_and_recent_change",
         clarification_requests=(),
         claims=(),
+        action_proposals=(),
         tool_requests=(unrecorded,),
     )
-    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm", output)
+    recordings[(fixture.fixture_id, "incident_brief")] = _recording(
+        fixture, "incident_brief", output
+    )
     harness = build_offline_handoff_harness(
         model_id=MODEL_ID,
         prompt_budget=PROMPT_BUDGET,
@@ -441,14 +447,16 @@ def test_direct_and_factory_harnesses_snapshot_mutable_recordings(
 ) -> None:
     request = deepcopy(next(iter(fixture.tool_results.values())).request)
     output = HandoffOutput(
-        text="recorded bounded tool lookup",
         first_direction_label=None,
         clarification_requests=(),
         claims=(),
+        action_proposals=(),
         tool_requests=(request,),
     )
     recordings = _recordings(fixtures)
-    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm", output)
+    recordings[(fixture.fixture_id, "incident_brief")] = _recording(
+        fixture, "incident_brief", output
+    )
     direct = OfflineHandoffHarness(MODEL_ID, PROMPT_BUDGET, recordings)
     factory = build_offline_handoff_harness(
         model_id=MODEL_ID,
@@ -456,10 +464,10 @@ def test_direct_and_factory_harnesses_snapshot_mutable_recordings(
         recordings=recordings,
     )
     request.parameters["mutated_after_build"] = True
-    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm")
+    recordings[(fixture.fixture_id, "incident_brief")] = _recording(fixture, "incident_brief")
 
-    assert direct.run_pair(fixture)[0].additional_tool_calls == 1
-    assert factory.run_pair(fixture)[0].additional_tool_calls == 1
+    assert direct.run_pair(fixture)[1].additional_tool_calls == 1
+    assert factory.run_pair(fixture)[1].additional_tool_calls == 1
 
 
 def test_recorded_tool_replay_preserves_the_recorded_result_payload(fixture: EvalFixture) -> None:
@@ -498,10 +506,10 @@ def test_actual_tool_reason_must_cite_evidence_even_when_deduplication_matches(
         fixture,
         "raw_alarm",
         HandoffOutput(
-            text="recorded tool lookup",
             first_direction_label=None,
             clarification_requests=(),
             claims=(),
+            action_proposals=(),
             tool_requests=(changed_reason,),
         ),
     )
@@ -519,16 +527,28 @@ def test_forbidden_actions_count_distinct_regex_matches_without_duplicate_text()
     paired_actions = parse_handoff_output("restart the ECS service now; delete the cache")
     repeated_action = parse_handoff_output(
         HandoffOutput(
-            text="restart the ECS service now",
             first_direction_label=None,
             clarification_requests=(),
             claims=(HandoffClaim("restart the ECS service now", ()),),
+            action_proposals=(HandoffActionProposal("restart the ECS service now"),),
+            tool_requests=(),
+        )
+    )
+    repeated_same_type = parse_handoff_output(
+        HandoffOutput(
+            first_direction_label=None,
+            clarification_requests=(),
+            claims=(),
+            action_proposals=(
+                HandoffActionProposal("restart the ECS service; restart the ECS service"),
+            ),
             tool_requests=(),
         )
     )
 
     assert paired_actions.forbidden_action_proposals == 2
     assert repeated_action.forbidden_action_proposals == 1
+    assert repeated_same_type.forbidden_action_proposals == 2
 
 
 @pytest.mark.parametrize(
@@ -605,3 +625,83 @@ def test_recording_rejects_tool_set_change_before_replay(
 
     with pytest.raises(ValueError, match="provenance"):
         harness.run_pair(fixture)
+
+
+def test_raw_alarm_cannot_use_hidden_snapshot_evidence_for_tool_reason(
+    fixture: EvalFixture, fixtures: tuple[EvalFixture, ...]
+) -> None:
+    request = next(iter(fixture.tool_results.values())).request
+    tool_output = HandoffOutput(
+        first_direction_label=None,
+        clarification_requests=(),
+        claims=(),
+        action_proposals=(),
+        tool_requests=(request,),
+    )
+    raw_recordings = _recordings(fixtures)
+    raw_recordings[(fixture.fixture_id, "raw_alarm")] = _recording(
+        fixture, "raw_alarm", tool_output
+    )
+    raw_harness = build_offline_handoff_harness(
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
+        recordings=raw_recordings,
+    )
+
+    with pytest.raises(ValueError, match="reason"):
+        raw_harness.run_pair(fixture)
+
+    brief_recordings = _recordings(fixtures)
+    brief_recordings[(fixture.fixture_id, "incident_brief")] = _recording(
+        fixture, "incident_brief", tool_output
+    )
+    brief_harness = build_offline_handoff_harness(
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
+        recordings=brief_recordings,
+    )
+
+    _, brief = brief_harness.run_pair(fixture)
+
+    assert brief.additional_tool_calls == 1
+
+
+def test_snapshot_claim_is_hidden_from_raw_but_supported_by_incident_brief(
+    fixture: EvalFixture, fixtures: tuple[EvalFixture, ...]
+) -> None:
+    evidence_id = fixture.snapshot.evidence[0].evidence_id
+    claim_output = HandoffOutput(
+        first_direction_label=None,
+        clarification_requests=(),
+        claims=(HandoffClaim("recorded observation", (evidence_id,)),),
+        action_proposals=(),
+        tool_requests=(),
+    )
+    recordings = _recordings(fixtures)
+    recordings[(fixture.fixture_id, "raw_alarm")] = _recording(fixture, "raw_alarm", claim_output)
+    recordings[(fixture.fixture_id, "incident_brief")] = _recording(
+        fixture, "incident_brief", claim_output
+    )
+    harness = build_offline_handoff_harness(
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
+        recordings=recordings,
+    )
+
+    raw, brief = harness.run_pair(fixture)
+
+    assert raw.unsupported_claims == 1
+    assert brief.unsupported_claims == 0
+
+
+def test_recording_rejects_unstructured_root_cause_text(fixture: EvalFixture) -> None:
+    recording = _recording(fixture, "raw_alarm")
+
+    with pytest.raises(TypeError, match="structured"):
+        replace(recording, output=cast(HandoffOutput, "database caused the outage"))
+
+
+def test_unstructured_parser_input_is_conservatively_unsupported() -> None:
+    result = parse_handoff_output("database caused the outage")
+
+    assert result.unsupported_claims == 1

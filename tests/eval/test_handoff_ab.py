@@ -4,6 +4,7 @@ import pytest
 
 from pilo_incident_investigator.evaluation.handoff import (
     CONDITIONS,
+    HandoffActionProposal,
     HandoffOutput,
     HandoffRecording,
     build_handoff_prompt,
@@ -39,14 +40,14 @@ def _recordings(fixtures: tuple[EvalFixture, ...]) -> dict[tuple[str, str], Hand
                 fixture_digest=fixture_digest(fixture),
                 tool_registry_id=tool_registry_identifier(fixture),
                 output=HandoffOutput(
-                    text=(
-                        "restart the ECS service now"
-                        if fixture.fixture_id == "ecs-oom-complete" and condition == "raw_alarm"
-                        else "recorded offline handoff output"
-                    ),
                     first_direction_label=None,
                     clarification_requests=(),
                     claims=(),
+                    action_proposals=(
+                        (HandoffActionProposal("restart the ECS service now"),)
+                        if fixture.fixture_id == "ecs-oom-complete" and condition == "raw_alarm"
+                        else ()
+                    ),
                     tool_requests=(),
                 ),
             )
