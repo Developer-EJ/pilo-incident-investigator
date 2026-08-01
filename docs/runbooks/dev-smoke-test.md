@@ -39,7 +39,7 @@ foreach ($name in @(
 if ($env:PILO_DEV_ACCOUNT_ID -notmatch "^[0-9]{12}$") { throw "Approved dev account ID is invalid" }
 if ($env:PILO_SYNTHETIC_ALARM_ARN -notmatch "^arn:aws:cloudwatch:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):alarm:pilo-incident-investigator-dev-smoke$") { throw "Synthetic alarm ARN is outside the approved account, region, or name" }
 if ($env:PILO_GITHUB_TOKEN_PARAMETER_ARN -eq $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN) { throw "SSM parameter ARNs must be distinct" }
-if ($env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2::foundation-model/[^[:space:]*?]+$" -and $env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):(inference-profile|application-inference-profile)/[^[:space:]*?]+$") { throw "Bedrock model ARN is outside the approved account or region" }
+if ($env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2::foundation-model/[^\s*?]+$" -and $env:PILO_BEDROCK_MODEL_ARN -notmatch "^arn:aws:bedrock:ap-northeast-2:$([regex]::Escape($env:PILO_DEV_ACCOUNT_ID)):(inference-profile|application-inference-profile)/[^\s*?]+$") { throw "Bedrock model ARN is outside the approved account or region" }
 
 $region = $env:AWS_REGION
 if (-not $region) { $region = $env:AWS_DEFAULT_REGION }
@@ -85,7 +85,41 @@ function Get-TerraformOutput([string]$Name) {
 
 function Assert-ExactSingleton([object]$Values, [string]$Expected, [string]$FailureMessage) {
   $items = @($Values | Where-Object { $null -ne $_ })
-  if ($items.Count -ne 1 -or [string]$items[0] -ne $Expected) { throw $FailureMessage }
+  if ($items.Count -ne 1 -or [string]$items[0] -cne $Expected) { throw $FailureMessage }
+}
+
+function Assert-ExactObjectKeys([object]$Object, [string[]]$ExpectedKeys, [string]$FailureMessage) {
+  if ($null -eq $Object) { throw $FailureMessage }
+  $actualKeys = @($Object.PSObject.Properties | ForEach-Object { $_.Name })
+  $unexpectedKeys = @($actualKeys | Where-Object { $ExpectedKeys -cnotcontains $_ })
+  $missingKeys = @($ExpectedKeys | Where-Object { $actualKeys -cnotcontains $_ })
+  if ($actualKeys.Count -ne $ExpectedKeys.Count -or $unexpectedKeys.Count -ne 0 -or $missingKeys.Count -ne 0) { throw $FailureMessage }
+}
+
+function Get-RequiredDynamoAttributeValue([object]$Item, [string]$Name, [string]$Type) {
+  $attributeProperty = $Item.PSObject.Properties[$Name]
+  if ($null -eq $attributeProperty) { throw "DynamoDB incident state attribute is missing" }
+  $attribute = $attributeProperty.Value
+  Assert-ExactObjectKeys $attribute @($Type) "DynamoDB incident state attribute type is invalid"
+  return $attribute.PSObject.Properties[$Type].Value
+}
+
+function Assert-DynamoIncidentState([object]$Item, [string]$ExpectedIncidentId) {
+  Assert-ExactObjectKeys $Item @("incident_id", "checkpoint", "checkpoint_rank", "bundle_stored", "issue_published", "slack_status", "processing_status") "DynamoDB incident state shape is invalid"
+  $incidentId = Get-RequiredDynamoAttributeValue $Item "incident_id" "S"
+  $checkpoint = Get-RequiredDynamoAttributeValue $Item "checkpoint" "S"
+  $checkpointRank = Get-RequiredDynamoAttributeValue $Item "checkpoint_rank" "N"
+  $bundleStored = Get-RequiredDynamoAttributeValue $Item "bundle_stored" "BOOL"
+  $issuePublished = Get-RequiredDynamoAttributeValue $Item "issue_published" "BOOL"
+  $slackStatus = Get-RequiredDynamoAttributeValue $Item "slack_status" "S"
+  $processingStatus = Get-RequiredDynamoAttributeValue $Item "processing_status" "S"
+  if ($incidentId -isnot [string] -or $incidentId -cne $ExpectedIncidentId -or $checkpoint -isnot [string] -or $checkpointRank -isnot [string] -or $bundleStored -isnot [bool] -or $issuePublished -isnot [bool] -or $slackStatus -isnot [string] -or $processingStatus -isnot [string]) { throw "DynamoDB incident state value type is invalid" }
+  $checkpointRanks = @{ "claimed" = 0; "snapshot_complete" = 1; "bundle_stored" = 2; "issue_published" = 3; "slack_attempted" = 4 }
+  if ($checkpoint -cnotin @("claimed", "snapshot_complete", "bundle_stored", "issue_published", "slack_attempted") -or $checkpointRank -notmatch "^[0-4]$" -or [int]$checkpointRank -ne $checkpointRanks[$checkpoint]) { throw "DynamoDB checkpoint is invalid" }
+  if ($processingStatus -cnotin @("processing", "retryable", "complete") -or $slackStatus -cnotin @("not_attempted", "failed", "sent")) { throw "DynamoDB incident state enum is invalid" }
+  if (($issuePublished -eq $true -and $bundleStored -ne $true) -or ($slackStatus -cne "not_attempted" -and $bundleStored -ne $true)) { throw "DynamoDB incident state has impossible publisher outcomes" }
+  if ($processingStatus -ceq "complete" -and ($bundleStored -ne $true -or $issuePublished -ne $true -or $slackStatus -cne "sent" -or $checkpoint -cne "slack_attempted" -or $checkpointRank -ne "4")) { throw "DynamoDB complete incident state is invalid" }
+  return [pscustomobject]@{ IsComplete = $processingStatus -ceq "complete" }
 }
 
 function Assert-ApprovedAccount {
@@ -176,13 +210,17 @@ function Assert-RuntimeBinding {
     "PILO_BEDROCK_MODEL_ID" = $env:PILO_BEDROCK_MODEL_ARN
     "PILO_MODE" = "snapshot_only"
   }
+  Assert-ExactObjectKeys $variables @("PILO_REGION", "PILO_TOPOLOGY_BUCKET", "PILO_TOPOLOGY_KEY", "PILO_STATE_TABLE", "PILO_BUNDLE_BUCKET", "PILO_GITHUB_REPOSITORY", "PILO_GITHUB_TOKEN_PARAMETER", "PILO_SLACK_WEBHOOK_PARAMETER", "PILO_BEDROCK_MODEL_ID", "PILO_MODE") "Lambda environment binding keys are invalid"
   foreach ($key in $expectedVariables.Keys) {
-    if ([string]$variables.($key) -ne [string]$expectedVariables[$key]) { throw "Lambda runtime binding does not match the approved input" }
+    if ([string]$variables.($key) -cne [string]$expectedVariables[$key]) { throw "Lambda runtime binding does not match the approved input" }
   }
   Assert-PrivateIncidentRepository
   $rule = Get-AwsJson @("events", "describe-rule", "--name", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge rule inspection failed"
   if ($rule.State -ne "ENABLED") { throw "EventBridge rule must be enabled" }
   try { $pattern = $rule.EventPattern | ConvertFrom-Json -ErrorAction Stop } catch { throw "EventBridge rule pattern is invalid" }
+  Assert-ExactObjectKeys $pattern @("source", "detail-type", "region", "resources", "detail") "EventBridge event pattern keys are invalid"
+  Assert-ExactObjectKeys $pattern.detail @("state") "EventBridge detail keys are invalid"
+  Assert-ExactObjectKeys $pattern.detail.state @("value") "EventBridge state keys are invalid"
   Assert-ExactSingleton $pattern.source "aws.cloudwatch" "EventBridge source must be the synthetic CloudWatch route"
   Assert-ExactSingleton $pattern."detail-type" "CloudWatch Alarm State Change" "EventBridge detail type is invalid"
   Assert-ExactSingleton $pattern.region "ap-northeast-2" "EventBridge region is invalid"
@@ -190,7 +228,10 @@ function Assert-RuntimeBinding {
   Assert-ExactSingleton $pattern.detail.state.value "ALARM" "EventBridge alarm state is invalid"
   $targets = Get-AwsJson @("events", "list-targets-by-rule", "--rule", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge target inspection failed"
   $targetItems = @($targets.Targets | Where-Object { $null -ne $_ })
-  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -ne $lambdaFunctionArn -or $null -ne $targetItems[0].Input -or $null -ne $targetItems[0].InputPath -or $null -ne $targetItems[0].InputTransformer) { throw "EventBridge target must bind the unmodified event to exactly one Lambda" }
+  if ($targetItems.Count -ne 1 -or $targetItems[0].Arn -ne $lambdaFunctionArn) { throw "EventBridge target must bind exactly one Lambda" }
+  foreach ($field in @("Input", "InputPath", "InputTransformer")) {
+    if ($null -ne $targetItems[0].PSObject.Properties[$field]) { throw "EventBridge target must bind the unmodified event to exactly one Lambda" }
+  }
 }
 
 function Wait-ForPublishedIncident {
@@ -198,7 +239,9 @@ function Wait-ForPublishedIncident {
   $deadline = [DateTime]::UtcNow.AddSeconds(360)
   while ($true) {
     $bundleList = Get-AwsJson @("s3api", "list-objects-v2", "--bucket", $bundleBucket, "--prefix", "incidents/", "--region", "ap-northeast-2", "--output", "json") "Bundle listing failed"
-    $recentBundles = @($bundleList.Contents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $StartedAt })
+    $contentsProperty = $bundleList.PSObject.Properties["Contents"]
+    $bundleContents = if ($null -eq $contentsProperty) { @() } else { @($contentsProperty.Value) }
+    $recentBundles = @($bundleContents | Where-Object { $null -ne $_ -and ([datetime]$_.LastModified).ToUniversalTime() -ge $StartedAt })
     if ($recentBundles.Count -gt 1) { throw "More than one isolated synthetic Incident Bundle was found" }
     if ($recentBundles.Count -eq 1) {
       $bundleKey = [string]$recentBundles[0].Key
@@ -208,17 +251,26 @@ function Wait-ForPublishedIncident {
       $bundleHead = Get-AwsJson @("s3api", "head-object", "--bucket", $bundleBucket, "--key", $bundleKey, "--region", "ap-northeast-2", "--output", "json") "Incident Bundle metadata check failed"
       if ($bundleHead.ServerSideEncryption -ne "AES256" -or [int64]$bundleHead.ContentLength -lt 1) { throw "Incident Bundle metadata is invalid" }
       $dynamoValues = @{ ":incident_id" = @{ "S" = $incidentId } } | ConvertTo-Json -Compress
-      $stateResult = Get-AwsJson @("dynamodb", "scan", "--table-name", $stateTable, "--filter-expression", "incident_id = :incident_id", "--projection-expression", "incident_id, bundle_stored, issue_published, slack_status, processing_status", "--expression-attribute-values", $dynamoValues, "--region", "ap-northeast-2", "--output", "json") "DynamoDB incident state check failed"
+      $stateResult = Get-AwsJson @("dynamodb", "scan", "--table-name", $stateTable, "--filter-expression", "incident_id = :incident_id", "--projection-expression", "incident_id, checkpoint, checkpoint_rank, bundle_stored, issue_published, slack_status, processing_status", "--expression-attribute-values", $dynamoValues, "--region", "ap-northeast-2", "--output", "json") "DynamoDB incident state check failed"
       $stateItems = @($stateResult.Items | Where-Object { $null -ne $_ })
       if ($stateItems.Count -gt 1) { throw "More than one DynamoDB state item was found" }
       if ($stateItems.Count -eq 1) {
         $stateItem = $stateItems[0]
-        if ($stateItem.bundle_stored.BOOL -eq $true -and $stateItem.issue_published.BOOL -eq $true -and $stateItem.slack_status.S -eq "sent" -and $stateItem.processing_status.S -eq "complete") {
+        $validatedState = Assert-DynamoIncidentState $stateItem $incidentId
+        if ($validatedState.IsComplete) {
           Assert-PrivateIncidentRepository
-          $issueProof = Get-GhJson @("issue", "list", "--repo", $env:PILO_INCIDENT_REPOSITORY, "--state", "all", "--search", "incident-id:$incidentId in:body", "--json", "number,body", "--jq", '{count: length, evidence: (length == 1 and (.[0].body | test("Evidence ID|evidence[-_ ]id|근거:"; "i")))}') "Private Incident Issue check failed"
-          if ($issueProof.count -gt 1) { throw "More than one private Incident Issue was found" }
-          if ($issueProof.count -eq 1 -and $issueProof.evidence -ne $true) { throw "Private Incident Issue lacks an Evidence ID citation" }
-          if ($issueProof.count -eq 1 -and $issueProof.evidence -eq $true) { return $incidentId }
+          $issues = @(Get-GhJson @("issue", "list", "--repo", $env:PILO_INCIDENT_REPOSITORY, "--state", "all", "--search", "incident-id:$incidentId in:body", "--json", "number,body") "Private Incident Issue check failed")
+          $markerPattern = "(?m)^<!-- incident-id:$([regex]::Escape($incidentId)) -->\r?$"
+          $matchingIssues = @($issues | Where-Object {
+            $bodyProperty = $_.PSObject.Properties["body"]
+            $null -ne $bodyProperty -and $bodyProperty.Value -is [string] -and $bodyProperty.Value -cmatch $markerPattern
+          })
+          if ($matchingIssues.Count -gt 1) { throw "More than one private Incident Issue has the canonical incident marker" }
+          if ($matchingIssues.Count -eq 1) {
+            $body = [string]$matchingIssues[0].PSObject.Properties["body"].Value
+            if ($body -cnotmatch "\(근거: E-[0-9]{3}(?:, E-[0-9]{3})*\)") { throw "Private Incident Issue lacks a canonical Evidence ID citation" }
+            return $incidentId
+          }
         }
       }
     }
