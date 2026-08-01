@@ -65,8 +65,8 @@ run "runtime_resources_are_bounded" {
   }
 
   assert {
-    condition     = aws_lambda_function.investigator.timeout <= 300 && aws_lambda_function.investigator.reserved_concurrent_executions > 0
-    error_message = "Lambda execution and concurrency must be explicitly bounded."
+    condition     = aws_lambda_function.investigator.timeout <= 300 && aws_lambda_function.investigator.reserved_concurrent_executions == 2
+    error_message = "Lambda execution must be bounded and reserved concurrency must default to two."
   }
 
   assert {
@@ -109,6 +109,60 @@ run "hybrid_agent_mode_is_explicitly_supported" {
     condition     = aws_lambda_function.investigator.environment[0].variables.PILO_MODE == "hybrid_agent"
     error_message = "The evaluated hybrid mode must reach the Lambda environment unchanged."
   }
+}
+
+run "synthetic_snapshot_smoke_may_use_unreserved_concurrency" {
+  command = plan
+
+  variables {
+    alarm_arns = [
+      "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-incident-investigator-dev-smoke",
+    ]
+    lambda_reserved_concurrency = -1
+  }
+
+  assert {
+    condition     = aws_lambda_function.investigator.reserved_concurrent_executions == -1
+    error_message = "The exact synthetic snapshot-only smoke route may omit reserved concurrency temporarily."
+  }
+}
+
+run "real_alarm_cannot_use_unreserved_concurrency" {
+  command = plan
+
+  variables {
+    lambda_reserved_concurrency = -1
+  }
+
+  expect_failures = [aws_lambda_function.investigator]
+}
+
+run "synthetic_alarm_must_be_the_only_unreserved_route" {
+  command = plan
+
+  variables {
+    alarm_arns = [
+      "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-incident-investigator-dev-smoke",
+      "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01",
+    ]
+    lambda_reserved_concurrency = -1
+  }
+
+  expect_failures = [aws_lambda_function.investigator]
+}
+
+run "hybrid_smoke_cannot_use_unreserved_concurrency" {
+  command = plan
+
+  variables {
+    alarm_arns = [
+      "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-incident-investigator-dev-smoke",
+    ]
+    lambda_reserved_concurrency = -1
+    operating_mode              = "hybrid_agent"
+  }
+
+  expect_failures = [aws_lambda_function.investigator]
 }
 
 run "alarm_route_enablement_is_explicit" {

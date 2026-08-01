@@ -9,6 +9,12 @@ locals {
   slack_parameter                = var.slack_webhook_parameter_arn
   lambda_handler_name            = "pilo_incident_investigator.handler.lambda_handler"
   bedrock_uses_inference_profile = can(regex(":(inference-profile|application-inference-profile)/", var.bedrock_model_arn))
+  synthetic_smoke_alarm_arn      = "arn:aws:cloudwatch:ap-northeast-2:${data.aws_caller_identity.current.account_id}:alarm:pilo-incident-investigator-dev-smoke"
+  unreserved_smoke_exception = (
+    var.lambda_reserved_concurrency == -1 &&
+    var.operating_mode == "snapshot_only" &&
+    var.alarm_arns == toset([local.synthetic_smoke_alarm_arn])
+  )
 }
 
 resource "aws_s3_bucket" "bundle" {
@@ -93,7 +99,7 @@ resource "aws_lambda_function" "investigator" {
 
   memory_size                    = 512
   timeout                        = 300
-  reserved_concurrent_executions = 2
+  reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   environment {
     variables = {
@@ -117,6 +123,11 @@ resource "aws_lambda_function" "investigator" {
     precondition {
       condition     = var.github_token_parameter_arn != var.slack_webhook_parameter_arn
       error_message = "GitHub and Slack must use two distinct existing SSM parameters."
+    }
+
+    precondition {
+      condition     = var.lambda_reserved_concurrency > 0 || local.unreserved_smoke_exception
+      error_message = "Unreserved Lambda concurrency is allowed only for the exact snapshot-only synthetic smoke Alarm."
     }
   }
 }

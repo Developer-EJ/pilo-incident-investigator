@@ -30,6 +30,20 @@ variable "lambda_zip_path" {
   }
 }
 
+variable "lambda_reserved_concurrency" {
+  description = "Reserved Lambda concurrency; -1 is allowed only for the exact snapshot-only synthetic smoke route."
+  type        = number
+  default     = 2
+
+  validation {
+    condition = (
+      var.lambda_reserved_concurrency == -1 ||
+      (var.lambda_reserved_concurrency >= 1 && var.lambda_reserved_concurrency <= 1000 && floor(var.lambda_reserved_concurrency) == var.lambda_reserved_concurrency)
+    )
+    error_message = "lambda_reserved_concurrency must be -1 or an integer from 1 through 1000."
+  }
+}
+
 variable "alarm_arns" {
   description = "Existing PILO dev CloudWatch Alarm ARNs routed to this service."
   type        = set(string)

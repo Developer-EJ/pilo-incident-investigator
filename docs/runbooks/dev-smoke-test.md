@@ -27,6 +27,11 @@ $ErrorActionPreference = "Stop"
 $SyntheticAlarmName = "pilo-incident-investigator-dev-smoke"
 $SyntheticMetricNamespace = "PILO/IncidentInvestigator/Smoke"
 $SyntheticMetricName = "Trigger"
+$SmokeProjectName = "pilo-incident-investigator"
+$SmokeLambdaFunctionName = "$SmokeProjectName-dev"
+
+if (-not [string]::IsNullOrWhiteSpace($env:TF_VAR_project_name) -and $env:TF_VAR_project_name -cne $SmokeProjectName) { throw "This runbook supports only the fixed smoke project name" }
+$env:TF_VAR_project_name = $SmokeProjectName
 
 foreach ($name in @(
   "PILO_DEV_ACCOUNT_ID", "PILO_SYNTHETIC_ALARM_ARN",
@@ -60,6 +65,29 @@ function Get-AwsText([string[]]$Arguments, [string]$FailureMessage) {
 function Get-AwsJson([string[]]$Arguments, [string]$FailureMessage) {
   $raw = Get-AwsText $Arguments $FailureMessage
   try { return $raw | ConvertFrom-Json -ErrorAction Stop } catch { throw $FailureMessage }
+}
+
+function Get-SmokeLambdaConcurrencySetting {
+  $accountSettings = Get-AwsJson @("lambda", "get-account-settings", "--region", "ap-northeast-2", "--output", "json") "Lambda account concurrency check failed"
+  $unreservedProperty = $accountSettings.AccountLimit.PSObject.Properties["UnreservedConcurrentExecutions"]
+  if ($null -eq $unreservedProperty -or [string]$unreservedProperty.Value -notmatch "^\d+$") { throw "Lambda unreserved concurrency is invalid" }
+  $unreservedConcurrency = [int]$unreservedProperty.Value
+
+  $matchingFunctions = @(Get-AwsJson @("lambda", "list-functions", "--query", "Functions[?FunctionName=='$SmokeLambdaFunctionName'].FunctionName", "--region", "ap-northeast-2", "--output", "json") "Lambda existence check failed")
+  if ($matchingFunctions.Count -gt 1) { throw "More than one smoke Lambda matched the exact function name" }
+  $currentReservedConcurrency = 0
+  if ($matchingFunctions.Count -eq 1) {
+    $functionConcurrency = Get-AwsJson @("lambda", "get-function-concurrency", "--function-name", $SmokeLambdaFunctionName, "--region", "ap-northeast-2", "--output", "json") "Lambda concurrency check failed"
+    $reservedProperty = $functionConcurrency.PSObject.Properties["ReservedConcurrentExecutions"]
+    if ($null -ne $reservedProperty) {
+      if ([string]$reservedProperty.Value -notmatch "^\d+$") { throw "Lambda reserved concurrency is invalid" }
+      $currentReservedConcurrency = [int]$reservedProperty.Value
+    }
+  }
+
+  $additionalReservation = [Math]::Max(0, 2 - $currentReservedConcurrency)
+  if ($unreservedConcurrency - $additionalReservation -ge 100) { return "2" }
+  return "-1"
 }
 
 function Get-GhText([string[]]$Arguments, [string]$FailureMessage) {
@@ -220,6 +248,14 @@ function Assert-RuntimeBinding([ValidateSet("DISABLED", "ENABLED")][string]$Expe
   foreach ($key in $expectedVariables.Keys) {
     if ([string]$variables.($key) -cne [string]$expectedVariables[$key]) { throw "Lambda runtime binding does not match the approved input" }
   }
+  $functionConcurrency = Get-AwsJson @("lambda", "get-function-concurrency", "--function-name", $lambdaFunction, "--region", "ap-northeast-2", "--output", "json") "Lambda concurrency check failed"
+  $reservedConcurrency = $functionConcurrency.PSObject.Properties["ReservedConcurrentExecutions"]
+  if ($env:TF_VAR_lambda_reserved_concurrency -eq "-1") {
+    if ($null -ne $reservedConcurrency) { throw "Synthetic smoke Lambda must not have reserved concurrency in the low-quota exception" }
+  }
+  elseif ($null -eq $reservedConcurrency -or [int]$reservedConcurrency.Value -ne 2) {
+    throw "Lambda reserved concurrency must be two outside the low-quota exception"
+  }
   Assert-PrivateIncidentRepository
   $rule = Get-AwsJson @("events", "describe-rule", "--name", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge rule inspection failed"
   if ($rule.State -ne $ExpectedRuleState) { throw "EventBridge rule state does not match the approved deployment stage" }
@@ -304,12 +340,15 @@ set-alarm-state는 action을 실행할 수 있으므로 alarm ownership, action-
 
 저장된 plan은 Git ignore 대상이어야 한다. 생성 전 ignore를 확인하고, plan 본문은 승인된 보호 콘솔에서만 검토한다. service-owned Lambda, EventBridge, private S3, DynamoDB, IAM, 전용 log group 외 변경이 있으면 중단한다.
 
+AWS는 계정의 unreserved concurrency를 최소 100 남기도록 요구한다. 현재 unreserved concurrency에서 이 Lambda에 추가로 필요한 예약량을 빼도 100 이상이면 정상값 2를 사용한다. 그렇지 않으면 이 runbook의 exact synthetic Alarm·`snapshot_only` 조합에 한해서만 `-1`(예약 없음)을 사용한다. 이 예외는 실제 PILO Alarm 또는 `hybrid_agent`에 사용할 수 없고 Terraform precondition이 이를 거부한다.
+
 ~~~powershell
 git check-ignore -q infra/saved-dev.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Saved Terraform plan path must be ignored" }
 python scripts/build_lambda.py
 if ($LASTEXITCODE -ne 0) { throw "Lambda artifact build failed" }
 Assert-ApprovedAccount
+$env:TF_VAR_lambda_reserved_concurrency = Get-SmokeLambdaConcurrencySetting
 $env:TF_VAR_event_route_enabled = "false"
 terraform -chdir=infra plan -out saved-dev.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
@@ -322,6 +361,7 @@ if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
 ~~~powershell
 Assert-ApprovedAccount
 Assert-PrivateIncidentRepository
+if ((Get-SmokeLambdaConcurrencySetting) -cne $env:TF_VAR_lambda_reserved_concurrency) { throw "Lambda concurrency eligibility changed; discard the saved plan and plan again" }
 terraform -chdir=infra apply saved-dev.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Terraform apply failed" }
 
@@ -347,6 +387,7 @@ git check-ignore -q infra/saved-dev-enable-route.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Saved route-enable plan path must be ignored" }
 $env:TF_VAR_event_route_enabled = "true"
 Assert-ApprovedAccount
+if ((Get-SmokeLambdaConcurrencySetting) -cne $env:TF_VAR_lambda_reserved_concurrency) { throw "Lambda concurrency eligibility changed; plan again before enabling the route" }
 terraform -chdir=infra plan -out saved-dev-enable-route.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Route-enable Terraform plan failed" }
 ~~~
@@ -355,6 +396,7 @@ if ($LASTEXITCODE -ne 0) { throw "Route-enable Terraform plan failed" }
 
 ~~~powershell
 Assert-ApprovedAccount
+if ((Get-SmokeLambdaConcurrencySetting) -cne $env:TF_VAR_lambda_reserved_concurrency) { throw "Lambda concurrency eligibility changed; discard the saved plan and plan again" }
 terraform -chdir=infra apply saved-dev-enable-route.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Route-enable Terraform apply failed" }
 Assert-RuntimeBinding "ENABLED"
@@ -363,7 +405,7 @@ $readyAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
 
 apply 시작부터 위 활성 binding과 OK gate가 성공할 때까지 synthetic Alarm을 trigger해서는 안 된다. 이 2단계 순서는 CloudWatch의 자동 상태 전이가 무-topology Lambda에 전달되는 구간도 제거한다.
 
-Assert-RuntimeBinding은 Lambda environment, EventBridge event pattern, EventBridge target을 정확한 singleton 값으로 검사한다. 따라서 이 smoke deployment의 rule은 전용 synthetic ARN만 route해야 하며 application alarm을 동시에 route하면 안 된다. 실제 PILO alarm route 활성화는 smoke 성공 뒤 별도 승인된 Terraform plan/apply로 전환하는 후속 단계다. 이 runbook은 application alarm route를 자동 적용하거나 복구하지 않는다.
+Assert-RuntimeBinding은 Lambda environment, concurrency, EventBridge event pattern, EventBridge target을 정확한 값으로 검사한다. 따라서 이 smoke deployment의 rule은 전용 synthetic ARN만 route해야 하며 application alarm을 동시에 route하면 안 된다. 실제 PILO alarm route 활성화는 smoke 성공 뒤 별도 승인된 Terraform plan/apply로 전환하는 후속 단계다. 그 전에 Lambda 계정 한도를 최소 102로 올리고 `TF_VAR_lambda_reserved_concurrency=2`인 plan에서 예약 동시성 2를 확인해야 한다. 이 runbook은 quota 변경이나 application alarm route를 자동 적용·복구하지 않는다.
 
 ## 3. trigger·결과·항상 실행되는 cleanup 확인
 
