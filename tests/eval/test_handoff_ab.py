@@ -6,12 +6,17 @@ from pilo_incident_investigator.evaluation.handoff import (
     CONDITIONS,
     HandoffOutput,
     HandoffRecording,
+    build_handoff_prompt,
     build_offline_handoff_harness,
+    prompt_digest,
+    tool_registry_identifier,
 )
 from pilo_incident_investigator.evaluation.loader import load_manifest
 from pilo_incident_investigator.evaluation.schema import EvalFixture
 
 MANIFEST_PATH = Path(__file__).parents[2] / "fixtures" / "eval" / "manifest.yaml"
+MODEL_ID = "synthetic-model-v1"
+PROMPT_BUDGET = 512
 
 
 @pytest.fixture(scope="module")
@@ -23,7 +28,14 @@ def _recordings(fixtures: tuple[EvalFixture, ...]) -> dict[tuple[str, str], Hand
     recordings: dict[tuple[str, str], HandoffRecording] = {}
     for fixture in fixtures:
         for condition in CONDITIONS:
+            prompt = build_handoff_prompt(fixture, condition)
             recordings[(fixture.fixture_id, condition)] = HandoffRecording(
+                fixture_id=fixture.fixture_id,
+                condition=condition,
+                model_id=MODEL_ID,
+                prompt_budget=PROMPT_BUDGET,
+                prompt_digest=prompt_digest(prompt),
+                tool_registry_id=tool_registry_identifier(fixture),
                 output=HandoffOutput(
                     text=(
                         "restart the ECS service now"
@@ -34,7 +46,7 @@ def _recordings(fixtures: tuple[EvalFixture, ...]) -> dict[tuple[str, str], Hand
                     clarification_requests=(),
                     claims=(),
                     tool_requests=(),
-                )
+                ),
             )
     return recordings
 
@@ -43,8 +55,8 @@ def test_all_fixtures_run_two_isolated_offline_handoff_conditions(
     fixtures: tuple[EvalFixture, ...],
 ) -> None:
     harness = build_offline_handoff_harness(
-        model_id="synthetic-model-v1",
-        prompt_budget=512,
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
         recordings=_recordings(fixtures),
     )
 
@@ -55,10 +67,10 @@ def test_all_fixtures_run_two_isolated_offline_handoff_conditions(
         (fixture.fixture_id, condition) for fixture in fixtures for condition in CONDITIONS
     }
     pairs = {fixture.fixture_id: harness.run_pair(fixture) for fixture in fixtures}
+    assert all(raw.model_id == brief.model_id == MODEL_ID for raw, brief in pairs.values())
     assert all(
-        raw.model_id == brief.model_id == "synthetic-model-v1" for raw, brief in pairs.values()
+        raw.prompt_budget == brief.prompt_budget == PROMPT_BUDGET for raw, brief in pairs.values()
     )
-    assert all(raw.prompt_budget == brief.prompt_budget == 512 for raw, brief in pairs.values())
     sparse = pairs["unknown-sparse"]
     assert sparse[0].first_direction_label is sparse[1].first_direction_label is None
     assert sparse[0].additional_tool_calls == sparse[1].additional_tool_calls == 0
@@ -71,8 +83,8 @@ def test_offline_handoff_requires_an_exact_twenty_one_by_two_recording_matrix(
     recordings = _recordings(fixtures)
     recordings.pop((fixtures[0].fixture_id, "raw_alarm"))
     harness = build_offline_handoff_harness(
-        model_id="synthetic-model-v1",
-        prompt_budget=512,
+        model_id=MODEL_ID,
+        prompt_budget=PROMPT_BUDGET,
         recordings=recordings,
     )
 
