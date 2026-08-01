@@ -1,0 +1,28 @@
+{
+  "version": "0",
+  "id": "evt-001",
+  "detail-type": "CloudWatch Alarm State Change",
+  "source": "aws.cloudwatch",
+  "account": "000000000000",
+  "time": "2026-08-01T01:02:03Z",
+  "region": "ap-northeast-2",
+  "resources": [
+    "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01"
+  ],
+  "detail": {
+    "alarmName": "pilo-dev-service-01",
+    "state": {
+      "value": "ALARM",
+      "reason": "synthetic test alarm",
+      "timestamp": "2026-08-01T01:02:02Z"
+    },
+    "previousState": {
+      "value": "OK",
+      "reason": "synthetic previous state",
+      "timestamp": "2026-08-01T00:59:00Z"
+    },
+    "configuration": {
+      "metrics": []
+    }
+  }
+}
