@@ -163,6 +163,24 @@ def test_validate_cli_prints_only_service_count(capsys: pytest.CaptureFixture[st
     assert capsys.readouterr().out == "valid topology: 8 services\n"
 
 
+def test_validate_cli_does_not_expose_invalid_topology_details(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sensitive_marker = "SENSITIVE-ALARM-ARN"
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        f"{sensitive_marker}: first\n{sensitive_marker}: second\n", encoding="utf-8"
+    )
+
+    exit_code = main(["validate", str(topology_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err == "invalid topology\n"
+    assert sensitive_marker not in captured.out + captured.err
+
+
 def test_public_example_is_valid_and_uses_only_synthetic_account() -> None:
     text = (REPO_ROOT / "config" / "pilo-topology.example.yaml").read_text(encoding="utf-8")
 

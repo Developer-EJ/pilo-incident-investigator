@@ -1,6 +1,7 @@
 """Strict PILO topology loading and resource authorization."""
 
 import argparse
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ class _UniqueKeyLoader(yaml.SafeLoader):
             except TypeError as error:
                 raise TopologyError("YAML mapping key must be hashable") from error
             if duplicate:
-                raise TopologyError(f"duplicate YAML key: {key}")
+                raise TopologyError("duplicate YAML key")
             mapping[key] = self.construct_object(value_node, deep=deep)
         return mapping
 
@@ -90,12 +91,12 @@ class Topology:
             for alarm_arn, keys in alarms.items()
         )
         known_services = set(service_keys)
-        for alarm_arn, mapped_keys in alarm_mappings:
+        for _, mapped_keys in alarm_mappings:
             if not mapped_keys:
-                raise TopologyError(f"alarm {alarm_arn} must map to at least one service")
+                raise TopologyError("alarm must map to at least one service")
             unknown = set(mapped_keys) - known_services
             if unknown:
-                raise TopologyError(f"alarm {alarm_arn} references unknown services")
+                raise TopologyError("alarm references unknown services")
 
         allowed_resources = _build_allowed_resources(services, alarm_mappings)
         return cls(
@@ -198,7 +199,11 @@ def main(argv: list[str] | None = None) -> int:
     validate_parser.add_argument("path", type=Path)
     args = parser.parse_args(argv)
 
-    topology = Topology.load(args.path.read_text(encoding="utf-8"))
+    try:
+        topology = Topology.load(args.path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TopologyError):
+        print("invalid topology", file=sys.stderr)
+        return 2
     print(f"valid topology: {len(topology.services)} services")
     return 0
 
