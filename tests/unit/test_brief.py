@@ -229,3 +229,43 @@ def test_render_issue_markdown_neutralizes_multiline_markdown_and_html() -> None
     assert "<b>" not in markdown
     assert "[링크](evil)" not in markdown
     assert "\t" not in markdown
+
+
+def _bundle_with_matching_id(evidence_id: str) -> IncidentBundle:
+    bundle = _bundle()
+    evidence = replace(bundle.snapshot.evidence[0], evidence_id=evidence_id)
+    investigation = Investigation(
+        facts=(SupportedStatement("matched evidence", (evidence_id,)),),
+        directions=(),
+        missing=(),
+        classification="matched",
+        tool_calls=(),
+        classification_evidence_ids=(evidence_id,),
+    )
+    return replace(
+        bundle,
+        snapshot=replace(
+            bundle.snapshot,
+            evidence=(evidence, bundle.snapshot.evidence[1]),
+        ),
+        investigation=investigation,
+    )
+
+
+@pytest.mark.parametrize("output", [render_issue_markdown, canonical_bundle_json])
+def test_outputs_reject_sensitive_key_assignment_structural_id(
+    output: Callable[[IncidentBundle], str | bytes],
+) -> None:
+    with pytest.raises(UnsafeBundleError) as caught:
+        output(_bundle_with_matching_id("github_token:opaque-value"))
+
+    assert "opaque-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize("output", [render_issue_markdown, canonical_bundle_json])
+def test_outputs_allow_existing_secret_rotation_tool_id(
+    output: Callable[[IncidentBundle], str | bytes],
+) -> None:
+    result = output(_bundle_with_matching_id("secret-rotation-metadata-a1b2-001"))
+
+    assert result

@@ -218,6 +218,67 @@ def test_sensitive_container_redacts_each_string_leaf_and_preserves_shape() -> N
     assert second_report.replacements == 0
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["github_token", "dbPassword", "service-secret", "SecretString", "apiKeyValue"],
+)
+def test_sensitive_key_tokenization_redacts_prefixed_and_suffixed_names(key: str) -> None:
+    bundle = _safe_bundle()
+    bundle.metadata[key] = "opaque-value"
+
+    redacted, report = Redactor().redact_bundle(bundle)
+
+    assert redacted.metadata[key] == "[REDACTED:SENSITIVE_FIELD]"
+    assert report.categories == (("SENSITIVE_FIELD", 1),)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["monkey", "secretary", "api_version", "private_subnet", "refresh_interval"],
+)
+def test_key_tokenization_does_not_redact_normal_context(key: str) -> None:
+    bundle = _safe_bundle()
+    bundle.metadata[key] = "ordinary-value"
+
+    redacted, report = Redactor().redact_bundle(bundle)
+
+    assert redacted.metadata[key] == "ordinary-value"
+    assert report.replacements == 0
+
+
+def test_contextual_credential_assignment_redacts_quoted_value() -> None:
+    value = 'dbPassword="hunter two words"'
+
+    redacted, report = Redactor().redact_text(value)
+
+    assert "hunter" not in redacted
+    assert report.categories == (("CREDENTIAL_ASSIGNMENT", 1),)
+
+
+@pytest.mark.parametrize("text", ["basic snapshot status", "bearer task count"])
+def test_authorization_scheme_words_in_normal_text_are_not_redacted(text: str) -> None:
+    redacted, report = Redactor().redact_text(text)
+
+    assert redacted == text
+    assert report.replacements == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bearer abc.def.ghi",
+        "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature",
+        "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==",
+        "Basic dXNlcjpwYXNz",
+    ],
+)
+def test_standalone_credential_shaped_authorization_is_redacted(text: str) -> None:
+    redacted, report = Redactor().redact_text(text)
+
+    assert text not in redacted
+    assert report.categories == (("AUTHORIZATION", 1),)
+
+
 def test_redact_bundle_fails_closed_without_echoing_invalid_value() -> None:
     bundle = _bundle_with_secrets()
     bundle.metadata["invalid"] = object()  # type: ignore[assignment]

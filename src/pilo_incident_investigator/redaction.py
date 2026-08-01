@@ -43,7 +43,7 @@ _RULES: tuple[_Rule, ...] = (
     ),
     (
         re.compile(
-            r"(?i)\b(?:authorization\s*[:=]?\s*)?(?:bearer|basic)\s+"
+            r"(?i)\bauthorization\s*[:=]?\s*(?:bearer|basic)\s+"
             r"(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+"
         ),
         "[REDACTED:AUTHORIZATION]",
@@ -64,19 +64,8 @@ _RULES: tuple[_Rule, ...] = (
         r"\1[REDACTED:QUERY_CREDENTIAL]",
         "QUERY_CREDENTIAL",
     ),
-    (
-        re.compile(
-            r"(?i)\b(password|passwd|secret|token|client[_-]?secret|"
-            r"aws[_-]?secret[_-]?access[_-]?key|x[_-]?api[_-]?key|api[_-]?key|"
-            r"refresh[_-]?token|id[_-]?token|auth[_-]?token|webhook[_-]?url|"
-            r"private[_-]?key|credentials?)\s*[=:]\s*(?!\[REDACTED:)"
-            r"""(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"""
-        ),
-        r"\1=[REDACTED:CREDENTIAL]",
-        "CREDENTIAL_ASSIGNMENT",
-    ),
 )
-_SENSITIVE_KEYS = frozenset(
+_SENSITIVE_EXACT_KEYS = frozenset(
     {
         "clientsecret",
         "accesstoken",
@@ -98,6 +87,30 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 _REDACTED_SENTINEL = re.compile(r"\[REDACTED:[A-Z_]+\]")
+_STANDALONE_AUTHORIZATION = re.compile(
+    r"(?i)\b(?P<scheme>bearer|basic)\s+"
+    r"(?P<credential>(?!\[REDACTED:AUTHORIZATION\])[^\s,;]+)"
+)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})\s*[=:]\s*"
+    r"(?![A-Za-z][A-Za-z0-9_.-]{0,127}\s*[=:])"
+    r"(?P<value>(?!\[REDACTED:)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+))"
+)
+_SENSITIVE_SINGLE_TOKENS = frozenset(
+    {"password", "passwd", "secret", "token", "authorization", "credential", "credentials"}
+)
+_SENSITIVE_TOKEN_PAIRS = frozenset(
+    {
+        ("client", "secret"),
+        ("refresh", "token"),
+        ("id", "token"),
+        ("auth", "token"),
+        ("api", "key"),
+        ("access", "key"),
+        ("private", "key"),
+        ("webhook", "url"),
+    }
+)
 
 
 class Redactor:
@@ -205,7 +218,7 @@ class Redactor:
             safe_key = self._redact_text(key, counts)
             if safe_key in redacted:
                 raise ValueError
-            sensitive = _normalize_key(key) in _SENSITIVE_KEYS
+            sensitive = _is_sensitive_key(key)
             safe_item = self._redact_json(item, counts, sensitive=sensitive)
             redacted[safe_key] = safe_item
         return redacted
@@ -240,7 +253,29 @@ class Redactor:
         for pattern, replacement, category in _RULES:
             redacted, replacements = pattern.subn(replacement, redacted)
             counts[category] += replacements
+        redacted = self._redact_standalone_authorization(redacted, counts)
+        redacted = self._redact_assignments(redacted, counts)
         return redacted
+
+    def _redact_standalone_authorization(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if not _looks_like_authorization_credential(
+                match.group("scheme"), match.group("credential")
+            ):
+                return match.group(0)
+            counts["AUTHORIZATION"] += 1
+            return "[REDACTED:AUTHORIZATION]"
+
+        return _STANDALONE_AUTHORIZATION.sub(replace, value)
+
+    def _redact_assignments(self, value: str, counts: Counter[str]) -> str:
+        def replace(match: re.Match[str]) -> str:
+            if not _is_sensitive_key(match.group("key")):
+                return match.group(0)
+            counts["CREDENTIAL_ASSIGNMENT"] += 1
+            return f"{match.group('key')}=[REDACTED:CREDENTIAL]"
+
+        return _CREDENTIAL_ASSIGNMENT.sub(replace, value)
 
     def _redact_sensitive_mapping(
         self, value: dict[str, JsonValue], counts: Counter[str]
@@ -289,5 +324,25 @@ def _validate_bundle_structural_ids(bundle: IncidentBundle) -> None:
         raise ValueError
 
 
-def _normalize_key(value: str) -> str:
-    return "".join(char for char in value.casefold() if char.isascii() and char.isalnum())
+def _key_tokens(value: str) -> tuple[str, ...]:
+    camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", value)
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", camel_split)
+    return tuple(token.casefold() for token in re.findall(r"[A-Za-z0-9]+", camel_split))
+
+
+def _is_sensitive_key(value: str) -> bool:
+    tokens = _key_tokens(value)
+    collapsed = "".join(tokens)
+    if collapsed in _SENSITIVE_EXACT_KEYS or any(
+        token in _SENSITIVE_SINGLE_TOKENS for token in tokens
+    ):
+        return True
+    return any(pair in _SENSITIVE_TOKEN_PAIRS for pair in zip(tokens, tokens[1:], strict=False))
+
+
+def _looks_like_authorization_credential(scheme: str, credential: str) -> bool:
+    if len(credential) < 10:
+        return False
+    if scheme.casefold() == "basic":
+        return len(credential) >= 12 and bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", credential))
+    return any(not char.isalpha() for char in credential)
