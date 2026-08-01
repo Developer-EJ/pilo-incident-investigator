@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -22,7 +22,10 @@ from pilo_incident_investigator.evaluation.report import (  # noqa: E402
     LiveEvaluationUnavailable,
     aggregate_payload,
     build_offline_report,
-    write_report,
+    write_reserved_report,
+)
+from pilo_incident_investigator.evaluation.report import (  # noqa: E402
+    reserve_report_slot as reserve_report_slot,
 )
 
 
@@ -31,7 +34,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.live_bedrock and not args.acknowledge_cost:
         parser.error("--live-bedrock requires --acknowledge-cost")
-    if args.live_bedrock and not args.model_id:
+    if args.live_bedrock and (not args.model_id or not args.model_id.strip()):
         parser.error("--live-bedrock requires --model-id")
     if args.live_bedrock and (
         args.input_cost_per_million is None or args.output_cost_per_million is None
@@ -44,16 +47,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     reports_dir = args.reports_dir.resolve()
-    generated_at = _next_available_timestamp(reports_dir, datetime.now(UTC))
-    report = build_offline_report(
-        load_manifest(ROOT / "fixtures" / "eval" / "manifest.yaml"),
-        generated_at=generated_at,
-        git_commit=_git_commit(),
-        model_id=OFFLINE_MODEL_ID,
-        input_cost_per_million=Decimal("0"),
-        output_cost_per_million=Decimal("0"),
-    )
-    write_report(report, reports_dir)
+    reservation = reserve_report_slot(reports_dir, _utc_now())
+    try:
+        report = build_offline_report(
+            load_manifest(ROOT / "fixtures" / "eval" / "manifest.yaml"),
+            generated_at=reservation.generated_at,
+            git_commit=_git_commit(),
+            model_id=OFFLINE_MODEL_ID,
+            input_cost_per_million=Decimal("0"),
+            output_cost_per_million=Decimal("0"),
+        )
+        write_reserved_report(report, reservation)
+    except Exception:
+        reservation.release()
+        raise
     print(json.dumps(aggregate_payload(report), ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -93,16 +100,8 @@ def _git_commit() -> str:
     return commit
 
 
-def _next_available_timestamp(reports_dir: Path, candidate: datetime) -> datetime:
-    timestamp = candidate.astimezone(UTC).replace(microsecond=0)
-    while True:
-        stamp = timestamp.strftime("%Y%m%dT%H%M%SZ")
-        if (
-            not (reports_dir / f"eval-{stamp}.json").exists()
-            and not (reports_dir / f"eval-{stamp}.md").exists()
-        ):
-            return timestamp
-        timestamp += timedelta(seconds=1)
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 if __name__ == "__main__":

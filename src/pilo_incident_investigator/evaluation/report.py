@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
@@ -57,6 +58,11 @@ METRIC_NAMES = (
 )
 OFFLINE_MODEL_ID = "offline-deterministic-v1"
 OFFLINE_PROMPT_BUDGET = 512
+OFFLINE_EXECUTION_KIND = "offline_neutral_recording"
+OFFLINE_MEASUREMENT_NOTICE = (
+    "offline neutral recording은 모델을 호출하지 않았으며 0 latency/token/cost는 "
+    "미측정 상태입니다. 이 결과는 실제 모델의 품질·속도·비용·안전성을 주장하지 않습니다."
+)
 
 
 class LiveEvaluationUnavailable(RuntimeError):
@@ -68,6 +74,16 @@ class GateReason:
     name: str
     passed: bool
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReportReservation:
+    generated_at: datetime
+    reports_dir: Path
+    lock_path: Path
+
+    def release(self) -> None:
+        self.lock_path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,25 +173,98 @@ def render_report(
 
 
 def write_report(report: EvaluationReport, reports_dir: Path) -> tuple[Path, Path]:
-    """Write both report formats, refusing to overwrite an existing evaluation."""
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    """Write a complete report pair without overwriting either final path."""
+    reservation = _reserve_exact_report_slot(reports_dir, report.generated_at)
+    return _write_reserved_report(report, reservation)
+
+
+def reserve_report_slot(reports_dir: Path, candidate: datetime) -> ReportReservation:
+    """Atomically reserve the first free timestamp at or after the candidate."""
+    directory = reports_dir.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = candidate.astimezone(UTC).replace(microsecond=0)
+    while True:
+        try:
+            return _reserve_exact_report_slot(directory, timestamp)
+        except FileExistsError:
+            timestamp += timedelta(seconds=1)
+
+
+def write_reserved_report(
+    report: EvaluationReport, reservation: ReportReservation
+) -> tuple[Path, Path]:
+    """Publish a report to a slot already reserved by this process."""
+    if report.generated_at.astimezone(UTC) != reservation.generated_at:
+        reservation.release()
+        raise ValueError("report timestamp does not match its reserved slot")
+    return _write_reserved_report(report, reservation)
+
+
+def _reserve_exact_report_slot(reports_dir: Path, generated_at: datetime) -> ReportReservation:
+    directory = reports_dir.resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = generated_at.astimezone(UTC).replace(microsecond=0)
+    stamp = timestamp.strftime("%Y%m%dT%H%M%SZ")
+    json_path = directory / f"eval-{stamp}.json"
+    markdown_path = directory / f"eval-{stamp}.md"
+    lock_path = directory / f".eval-{stamp}.lock"
+    if json_path.exists() or markdown_path.exists():
+        raise FileExistsError(f"evaluation report already exists for timestamp {stamp}")
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise FileExistsError(f"evaluation report timestamp {stamp} is reserved") from None
+    try:
+        os.close(descriptor)
+    except Exception:
+        lock_path.unlink(missing_ok=True)
+        raise
+    reservation = ReportReservation(timestamp, directory, lock_path)
+    if json_path.exists() or markdown_path.exists():
+        reservation.release()
+        raise FileExistsError(f"evaluation report already exists for timestamp {stamp}")
+    return reservation
+
+
+def _write_reserved_report(
+    report: EvaluationReport, reservation: ReportReservation
+) -> tuple[Path, Path]:
+    reports_dir = reservation.reports_dir
     stamp = report.generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     json_path = reports_dir / f"eval-{stamp}.json"
     markdown_path = reports_dir / f"eval-{stamp}.md"
-    if json_path.exists() or markdown_path.exists():
-        raise FileExistsError(f"evaluation report already exists for timestamp {stamp}")
-    json_path.write_text(
-        render_report(report, output_format="json"), encoding="utf-8", newline="\n"
-    )
-    markdown_path.write_text(
-        render_report(report, output_format="markdown"), encoding="utf-8", newline="\n"
-    )
-    return json_path, markdown_path
+    json_temp = reports_dir / f".eval-{stamp}.json.tmp"
+    markdown_temp = reports_dir / f".eval-{stamp}.md.tmp"
+    created_temps: list[Path] = []
+    created_finals: list[Path] = []
+    try:
+        _write_lf_text(json_temp, render_report(report, output_format="json"))
+        created_temps.append(json_temp)
+        _write_lf_text(markdown_temp, render_report(report, output_format="markdown"))
+        created_temps.append(markdown_temp)
+        _create_exclusive_file(json_path)
+        created_finals.append(json_path)
+        _create_exclusive_file(markdown_path)
+        created_finals.append(markdown_path)
+        os.replace(json_temp, json_path)
+        os.replace(markdown_temp, markdown_path)
+        return json_path, markdown_path
+    except Exception:
+        for path in created_finals:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        for path in created_temps:
+            path.unlink(missing_ok=True)
+        reservation.release()
 
 
 def aggregate_payload(report: EvaluationReport) -> dict[str, JsonValue]:
     """Return aggregate-only output suitable for stdout and CI logs."""
     payload: dict[str, JsonValue] = {
+        "execution_kind": OFFLINE_EXECUTION_KIND,
+        "model_called": False,
+        "measurement_notice": OFFLINE_MEASUREMENT_NOTICE,
         "snapshot_only": _mode_payload(report.comparison.snapshot_only),
         "hybrid_agent": _mode_payload(report.comparison.hybrid_agent),
         "handoff": _handoff_aggregate(report.handoff_runs),
@@ -313,6 +402,9 @@ def _gate_reasons(comparison: ComparisonMetrics) -> tuple[GateReason, ...]:
 
 def _report_payload(report: EvaluationReport) -> dict[str, JsonValue]:
     return {
+        "execution_kind": OFFLINE_EXECUTION_KIND,
+        "model_called": False,
+        "measurement_notice": OFFLINE_MEASUREMENT_NOTICE,
         "metadata": {
             "generated_at": _timestamp(report.generated_at),
             "git_commit": report.git_commit,
@@ -408,6 +500,9 @@ def _render_markdown(payload: dict[str, JsonValue]) -> str:
     lines = [
         "# PILO Incident Evaluation",
         "",
+        f"- Execution kind: {payload['execution_kind']}",
+        f"- Model called: {str(payload['model_called']).lower()}",
+        f"- Measurement notice: {payload['measurement_notice']}",
         f"- 생성 시각: {metadata['generated_at']}",
         f"- Git commit: {metadata['git_commit']}",
         f"- Model ID: {metadata['model_id']}",
@@ -476,6 +571,29 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _write_lf_text(path: Path, content: str) -> None:
+    created = False
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as stream:
+            created = True
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+
+
+def _create_exclusive_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.close(descriptor)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def _validate_metadata(
     generated_at: datetime,
     git_commit: str,
@@ -498,8 +616,11 @@ __all__ = [
     "EvaluationReport",
     "GateReason",
     "LiveEvaluationUnavailable",
+    "ReportReservation",
     "aggregate_payload",
     "build_offline_report",
     "render_report",
+    "reserve_report_slot",
     "write_report",
+    "write_reserved_report",
 ]

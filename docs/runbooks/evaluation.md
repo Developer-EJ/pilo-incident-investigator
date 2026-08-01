@@ -1,6 +1,8 @@
 # 평가 실행 Runbook
 
-이 절차는 익명화된 21개 fixture에서 `snapshot_only`와 `hybrid_agent`를 비교하고, raw Alarm과 Incident Brief의 Codex handoff 가치를 A/B로 확인한다. 기본 경로는 기록된 입력만 사용하는 offline 평가이며 AWS, Bedrock, GitHub, Slack을 호출하지 않는다.
+이 절차는 익명화된 21개 fixture에서 `snapshot_only`와 `hybrid_agent`를 비교하고, raw Alarm과 Incident Brief의 Codex handoff 구조를 회귀 검사한다. 기본 경로는 관찰 가능한 Alarm·Snapshot·recorded Tool 데이터로 만든 결정적 중립 출력을 replay하는 `offline_neutral_recording` harness이며 AWS, Bedrock, GitHub, Slack을 호출하지 않는다.
+
+Offline neutral regression은 실제 모델 평가가 아니다. 보고서의 `model_called=false`는 모델을 호출하지 않았다는 뜻이다. 따라서 latency, input/output token, estimated cost의 `0`은 좋은 성능이나 무료 실행이 아니라 **미측정** 상태다. Offline 결과만으로 실제 모델의 품질·속도·비용·안전성을 주장하지 않는다.
 
 ## Offline 평가
 
@@ -10,7 +12,7 @@
 make eval
 ```
 
-이 명령은 fixture 검증과 평가 회귀 테스트를 실행한 다음 정확히 21×2 investigation run과 21×2 handoff run을 생성한다. stdout에는 fixture별 내용이 아닌 aggregate metric과 gate 결과만 출력된다. 상세 결과는 다음 두 파일에 기록되며 기본적으로 Git ignore 대상이다.
+이 명령은 fixture 검증과 offline neutral 회귀 테스트를 실행한 다음 정확히 21×2 investigation run과 21×2 handoff run을 생성한다. JSON, Markdown, stdout에는 `execution_kind=offline_neutral_recording`, `model_called=false`, 미측정 경고가 함께 기록된다. stdout에는 fixture별 내용이 아닌 aggregate metric과 gate 결과만 출력된다. 상세 결과는 다음 두 파일에 기록되며 기본적으로 Git ignore 대상이다.
 
 - `reports/eval-YYYYMMDDTHHMMSSZ.json`
 - `reports/eval-YYYYMMDDTHHMMSSZ.md`
@@ -27,7 +29,7 @@ make verify
 
 ## Live Bedrock 평가 승인 조건
 
-Live 평가는 비용과 외부 호출이 발생하므로 사람의 명시적 사전 승인이 필요하다. 승인 시에도 model 또는 inference profile ID를 실행 전체에서 고정하고, input/output 100만 token당 단가를 명시해야 한다. 허용되는 명령 형태는 다음 하나뿐이다.
+Actual live model evaluation만 모델 품질·속도·token·비용을 측정할 수 있다. Live 평가는 비용과 외부 호출이 발생하므로 사람의 명시적 사전 승인이 필요하다. 승인 시에도 model 또는 inference profile ID를 실행 전체에서 고정하고, input/output 100만 token당 단가를 명시해야 한다. 허용되는 명령 형태는 다음 하나뿐이다.
 
 ```shell
 python scripts/run_eval.py --live-bedrock --model-id "$PILO_BEDROCK_MODEL_ID" --input-cost-per-million "$PILO_BEDROCK_INPUT_RATE" --output-cost-per-million "$PILO_BEDROCK_OUTPUT_RATE" --acknowledge-cost

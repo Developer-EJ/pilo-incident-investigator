@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 from typing import Literal
 
 import pytest
 
+import pilo_incident_investigator.evaluation.report as report_module
+import scripts.run_eval as run_eval_module
 from pilo_incident_investigator.evaluation.loader import load_manifest
 from pilo_incident_investigator.evaluation.report import (
     METRIC_NAMES,
     EvaluationReport,
     LiveEvaluationUnavailable,
+    ReportReservation,
     aggregate_payload,
     build_offline_report,
     render_report,
+    reserve_report_slot,
     write_report,
 )
 from scripts.run_eval import main
@@ -111,8 +117,16 @@ def test_report_rendering_is_stable_and_includes_metadata_gate_and_reasons(
         "output_cost_per_million": "0",
     }
     assert payload["operating_mode"] == "snapshot_only"
+    assert payload["execution_kind"] == "offline_neutral_recording"
+    assert payload["model_called"] is False
+    assert "미측정" in payload["measurement_notice"]
+    assert "주장하지 않습니다" in payload["measurement_notice"]
     assert len(payload["gate_reasons"]) == 6
     assert "운영 권장 모드: snapshot_only" in markdown
+    assert "Execution kind: offline_neutral_recording" in markdown
+    assert "Model called: false" in markdown
+    assert "미측정" in markdown
+    assert "주장하지 않습니다" in markdown
     assert all(f"`{metric_name}`" in markdown for metric_name in METRIC_NAMES)
     assert all(reason.name in markdown for reason in report.gate_reasons)
 
@@ -131,6 +145,69 @@ def test_write_report_uses_timestamped_json_and_markdown_names(
     )
     assert b"\r\n" not in json_path.read_bytes()
     assert b"\r\n" not in markdown_path.read_bytes()
+
+
+def test_same_timestamp_reservations_select_distinct_slots(tmp_path: Path) -> None:
+    first = reserve_report_slot(tmp_path, GENERATED_AT)
+    second = reserve_report_slot(tmp_path, GENERATED_AT)
+    try:
+        assert first.generated_at == GENERATED_AT
+        assert second.generated_at == GENERATED_AT.replace(second=6)
+        assert first.lock_path != second.lock_path
+        assert first.lock_path.exists()
+        assert second.lock_path.exists()
+    finally:
+        first.release()
+        second.release()
+
+
+def test_second_temp_write_failure_leaves_no_final_pair(
+    report: EvaluationReport, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = report_module._write_lf_text
+    calls = 0
+
+    def fail_second_write(path: Path, content: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("synthetic second write failure")
+        real_write(path, content)
+
+    monkeypatch.setattr(report_module, "_write_lf_text", fail_second_write)
+
+    with pytest.raises(OSError, match="second write failure"):
+        write_report(report, tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preexisting_report_is_never_overwritten(report: EvaluationReport, tmp_path: Path) -> None:
+    existing = tmp_path / "eval-20260802T030405Z.json"
+    existing.write_bytes(b"preexisting")
+
+    with pytest.raises(FileExistsError):
+        write_report(report, tmp_path)
+
+    assert existing.read_bytes() == b"preexisting"
+    assert not (tmp_path / "eval-20260802T030405Z.md").exists()
+    assert not tuple(tmp_path.glob(".*.tmp"))
+    assert not tuple(tmp_path.glob("*.lock"))
+
+
+def test_failed_write_does_not_remove_a_preexisting_temp(
+    report: EvaluationReport, tmp_path: Path
+) -> None:
+    existing_temp = tmp_path / ".eval-20260802T030405Z.json.tmp"
+    existing_temp.write_bytes(b"preexisting-temp")
+
+    with pytest.raises(FileExistsError):
+        write_report(report, tmp_path)
+
+    assert existing_temp.read_bytes() == b"preexisting-temp"
+    assert not tuple(tmp_path.glob("eval-*.json"))
+    assert not tuple(tmp_path.glob("eval-*.md"))
+    assert not tuple(tmp_path.glob("*.lock"))
 
 
 @pytest.mark.parametrize(
@@ -178,6 +255,27 @@ def test_fully_acknowledged_live_cli_still_refuses_without_a_safe_adapter() -> N
         )
 
 
+def test_live_cli_rejects_whitespace_only_model_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--live-bedrock",
+                "--acknowledge-cost",
+                "--model-id",
+                "   ",
+                "--input-cost-per-million",
+                "1.25",
+                "--output-cost-per-million",
+                "5.00",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "--live-bedrock requires --model-id" in capsys.readouterr().err
+
+
 def test_offline_cli_prints_only_aggregate_metrics_and_writes_reports(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -187,12 +285,49 @@ def test_offline_cli_prints_only_aggregate_metrics_and_writes_reports(
     stdout = capsys.readouterr().out
     payload = json.loads(stdout)
     assert set(payload) == {
+        "execution_kind",
         "gate_reasons",
         "handoff",
         "hybrid_agent",
+        "measurement_notice",
+        "model_called",
         "operating_mode",
         "snapshot_only",
     }
+    assert payload["execution_kind"] == "offline_neutral_recording"
+    assert payload["model_called"] is False
+    assert "미측정" in payload["measurement_notice"]
+    assert "주장하지 않습니다" in payload["measurement_notice"]
     assert "ecs-oom-complete" not in stdout
     assert len(tuple(tmp_path.glob("eval-*.json"))) == 1
     assert len(tuple(tmp_path.glob("eval-*.md"))) == 1
+
+
+def test_concurrent_offline_cli_runs_publish_distinct_complete_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    barrier = Barrier(2)
+    real_reserve = run_eval_module.reserve_report_slot
+
+    def reserve_together(reports_dir: Path, candidate: datetime) -> ReportReservation:
+        barrier.wait()
+        return real_reserve(reports_dir, candidate)
+
+    monkeypatch.setattr(run_eval_module, "_utc_now", lambda: GENERATED_AT)
+    monkeypatch.setattr(run_eval_module, "reserve_report_slot", reserve_together)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda _: main(["--reports-dir", str(tmp_path)]),
+                range(2),
+            )
+        )
+
+    assert results == (0, 0)
+    json_paths = tuple(sorted(tmp_path.glob("eval-*.json")))
+    markdown_paths = tuple(sorted(tmp_path.glob("eval-*.md")))
+    assert len(json_paths) == len(markdown_paths) == 2
+    assert {path.stem for path in json_paths} == {path.stem for path in markdown_paths}
+    assert not tuple(tmp_path.glob("*.lock"))
+    assert not tuple(tmp_path.glob(".*.tmp"))
