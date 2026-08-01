@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, cast
 
@@ -63,6 +65,13 @@ OFFLINE_MEASUREMENT_NOTICE = (
     "offline neutral recording은 모델을 호출하지 않았으며 0 latency/token/cost는 "
     "미측정 상태입니다. 이 결과는 실제 모델의 품질·속도·비용·안전성을 주장하지 않습니다."
 )
+_PROVENANCE_PATHSPECS = (
+    ":(glob)src/pilo_incident_investigator/*.py",
+    ":(glob)src/pilo_incident_investigator/**/*.py",
+    "scripts/run_eval.py",
+    ":(glob)fixtures/eval/*.yaml",
+    ":(glob)fixtures/eval/**/*.yaml",
+)
 
 
 class LiveEvaluationUnavailable(RuntimeError):
@@ -87,9 +96,18 @@ class ReportReservation:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceProvenance:
+    git_commit: str
+    git_dirty: bool
+    source_fixture_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     generated_at: datetime
     git_commit: str
+    git_dirty: bool
+    source_fixture_digest: str
     model_id: str
     input_cost_per_million: Decimal
     output_cost_per_million: Decimal
@@ -103,12 +121,18 @@ class EvaluationReport:
     def metric_names(self) -> tuple[str, ...]:
         return METRIC_NAMES
 
+    @property
+    def baseline_eligible(self) -> bool:
+        return not self.git_dirty
+
 
 def build_offline_report(
     fixtures: Iterable[EvalFixture],
     *,
     generated_at: datetime,
     git_commit: str,
+    git_dirty: bool,
+    source_fixture_digest: str,
     model_id: str = OFFLINE_MODEL_ID,
     input_cost_per_million: Decimal = Decimal("0"),
     output_cost_per_million: Decimal = Decimal("0"),
@@ -121,6 +145,8 @@ def build_offline_report(
         model_id,
         input_cost_per_million,
         output_cost_per_million,
+        git_dirty,
+        source_fixture_digest,
     )
     investigation_runs = build_offline_runner(_investigation_recordings(fixture_rows)).run_all(
         fixture_rows
@@ -147,6 +173,8 @@ def build_offline_report(
     return EvaluationReport(
         generated_at=generated_at.astimezone(UTC),
         git_commit=git_commit,
+        git_dirty=git_dirty,
+        source_fixture_digest=source_fixture_digest,
         model_id=model_id,
         input_cost_per_million=input_cost_per_million,
         output_cost_per_million=output_cost_per_million,
@@ -190,6 +218,47 @@ def reserve_report_slot(reports_dir: Path, candidate: datetime) -> ReportReserva
             timestamp += timedelta(seconds=1)
 
 
+def collect_source_provenance(repo_root: Path) -> SourceProvenance:
+    """Return HEAD, relevant working-tree dirtiness, and a stable source/fixture digest."""
+    root = repo_root.resolve()
+    commit = _run_git(root, "rev-parse", "HEAD").stdout.strip()
+    if not commit:
+        raise RuntimeError("git commit could not be determined")
+    status = _run_git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        *_PROVENANCE_PATHSPECS,
+    ).stdout
+    return SourceProvenance(
+        git_commit=commit,
+        git_dirty=bool(status),
+        source_fixture_digest=_source_fixture_digest(root),
+    )
+
+
+def is_complete_report_pair(reports_dir: Path, generated_at: datetime) -> bool:
+    """Accept only nonempty JSON/Markdown whose hashes match the completion marker."""
+    json_path, markdown_path, marker_path = _final_report_paths(reports_dir.resolve(), generated_at)
+    try:
+        if any(
+            not path.is_file() or path.stat().st_size == 0 for path in (json_path, markdown_path)
+        ):
+            return False
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict) or set(marker) != {"json_sha256", "markdown_sha256"}:
+            return False
+        return marker == {
+            "json_sha256": _file_digest(json_path),
+            "markdown_sha256": _file_digest(markdown_path),
+        }
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
 def write_reserved_report(
     report: EvaluationReport, reservation: ReportReservation
 ) -> tuple[Path, Path]:
@@ -205,10 +274,9 @@ def _reserve_exact_report_slot(reports_dir: Path, generated_at: datetime) -> Rep
     directory.mkdir(parents=True, exist_ok=True)
     timestamp = generated_at.astimezone(UTC).replace(microsecond=0)
     stamp = timestamp.strftime("%Y%m%dT%H%M%SZ")
-    json_path = directory / f"eval-{stamp}.json"
-    markdown_path = directory / f"eval-{stamp}.md"
+    json_path, markdown_path, marker_path = _final_report_paths(directory, timestamp)
     lock_path = directory / f".eval-{stamp}.lock"
-    if json_path.exists() or markdown_path.exists():
+    if json_path.exists() or markdown_path.exists() or marker_path.exists():
         raise FileExistsError(f"evaluation report already exists for timestamp {stamp}")
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -220,7 +288,7 @@ def _reserve_exact_report_slot(reports_dir: Path, generated_at: datetime) -> Rep
         lock_path.unlink(missing_ok=True)
         raise
     reservation = ReportReservation(timestamp, directory, lock_path)
-    if json_path.exists() or markdown_path.exists():
+    if json_path.exists() or markdown_path.exists() or marker_path.exists():
         reservation.release()
         raise FileExistsError(f"evaluation report already exists for timestamp {stamp}")
     return reservation
@@ -233,27 +301,49 @@ def _write_reserved_report(
     stamp = report.generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     json_path = reports_dir / f"eval-{stamp}.json"
     markdown_path = reports_dir / f"eval-{stamp}.md"
+    marker_path = reports_dir / f".eval-{stamp}.complete"
     json_temp = reports_dir / f".eval-{stamp}.json.tmp"
     markdown_temp = reports_dir / f".eval-{stamp}.md.tmp"
+    marker_temp = reports_dir / f".eval-{stamp}.complete.tmp"
     created_temps: list[Path] = []
-    created_finals: list[Path] = []
+    created_outputs: list[Path] = []
+    success = False
     try:
         _write_lf_text(json_temp, render_report(report, output_format="json"))
         created_temps.append(json_temp)
         _write_lf_text(markdown_temp, render_report(report, output_format="markdown"))
         created_temps.append(markdown_temp)
         _create_exclusive_file(json_path)
-        created_finals.append(json_path)
+        created_outputs.append(json_path)
         _create_exclusive_file(markdown_path)
-        created_finals.append(markdown_path)
-        os.replace(json_temp, json_path)
-        os.replace(markdown_temp, markdown_path)
+        created_outputs.append(markdown_path)
+        _replace_file(json_temp, json_path)
+        _replace_file(markdown_temp, markdown_path)
+        if json_path.stat().st_size == 0 or markdown_path.stat().st_size == 0:
+            raise OSError("report finals must be nonempty before completion")
+        marker_content = (
+            json.dumps(
+                {
+                    "json_sha256": _file_digest(json_path),
+                    "markdown_sha256": _file_digest(markdown_path),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        _write_lf_text(marker_temp, marker_content)
+        created_temps.append(marker_temp)
+        _create_exclusive_file(marker_path)
+        created_outputs.append(marker_path)
+        _replace_file(marker_temp, marker_path)
+        success = True
         return json_path, markdown_path
-    except Exception:
-        for path in created_finals:
-            path.unlink(missing_ok=True)
-        raise
     finally:
+        if not success:
+            for path in created_outputs:
+                path.unlink(missing_ok=True)
         for path in created_temps:
             path.unlink(missing_ok=True)
         reservation.release()
@@ -262,6 +352,9 @@ def _write_reserved_report(
 def aggregate_payload(report: EvaluationReport) -> dict[str, JsonValue]:
     """Return aggregate-only output suitable for stdout and CI logs."""
     payload: dict[str, JsonValue] = {
+        "git_dirty": report.git_dirty,
+        "source_fixture_digest": report.source_fixture_digest,
+        "baseline_eligible": report.baseline_eligible,
         "execution_kind": OFFLINE_EXECUTION_KIND,
         "model_called": False,
         "measurement_notice": OFFLINE_MEASUREMENT_NOTICE,
@@ -406,11 +499,14 @@ def _report_payload(report: EvaluationReport) -> dict[str, JsonValue]:
         "model_called": False,
         "measurement_notice": OFFLINE_MEASUREMENT_NOTICE,
         "metadata": {
+            "baseline_eligible": report.baseline_eligible,
             "generated_at": _timestamp(report.generated_at),
             "git_commit": report.git_commit,
+            "git_dirty": report.git_dirty,
             "model_id": report.model_id,
             "input_cost_per_million": str(report.input_cost_per_million),
             "output_cost_per_million": str(report.output_cost_per_million),
+            "source_fixture_digest": report.source_fixture_digest,
         },
         "metric_names": list(report.metric_names),
         "operating_mode": report.operating_mode,
@@ -505,9 +601,17 @@ def _render_markdown(payload: dict[str, JsonValue]) -> str:
         f"- Measurement notice: {payload['measurement_notice']}",
         f"- 생성 시각: {metadata['generated_at']}",
         f"- Git commit: {metadata['git_commit']}",
+        f"- Git dirty: {str(metadata['git_dirty']).lower()}",
+        f"- Source fixture digest: {metadata['source_fixture_digest']}",
+        f"- Baseline eligible: {str(metadata['baseline_eligible']).lower()}",
         f"- Model ID: {metadata['model_id']}",
         f"- Input cost / 1M tokens: {metadata['input_cost_per_million']}",
         f"- Output cost / 1M tokens: {metadata['output_cost_per_million']}",
+        (
+            "- Baseline 상태: clean-tree 기술 조건을 충족했지만 사람의 검토가 필요합니다."
+            if metadata["baseline_eligible"]
+            else "- Baseline 상태: baseline 부적격 — relevant working tree가 dirty입니다."
+        ),
         "",
         "## Metric contract",
         "",
@@ -594,17 +698,79 @@ def _create_exclusive_file(path: Path) -> None:
         raise
 
 
+def _replace_file(source: Path, destination: Path) -> None:
+    os.replace(source, destination)
+
+
+def _final_report_paths(reports_dir: Path, generated_at: datetime) -> tuple[Path, Path, Path]:
+    stamp = generated_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return (
+        reports_dir / f"eval-{stamp}.json",
+        reports_dir / f"eval-{stamp}.md",
+        reports_dir / f".eval-{stamp}.complete",
+    )
+
+
+def _file_digest(path: Path) -> str:
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def _source_fixture_digest(root: Path) -> str:
+    paths = {
+        *root.joinpath("src", "pilo_incident_investigator").rglob("*.py"),
+        root / "scripts" / "run_eval.py",
+        *root.joinpath("fixtures", "eval").rglob("*.yaml"),
+    }
+    required = {
+        root / "scripts" / "run_eval.py",
+        root / "fixtures" / "eval" / "manifest.yaml",
+    }
+    if not required.issubset(paths) or any(
+        not path.is_file() or path.is_symlink() for path in paths
+    ):
+        raise RuntimeError("evaluation provenance source set is incomplete or unsafe")
+    digest = sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _validate_metadata(
     generated_at: datetime,
     git_commit: str,
     model_id: str,
     input_rate: Decimal,
     output_rate: Decimal,
+    git_dirty: bool,
+    source_fixture_digest: str,
 ) -> None:
     if generated_at.tzinfo is None or generated_at.utcoffset() is None:
         raise ValueError("generated_at must be timezone-aware")
     if not git_commit.strip() or not model_id.strip():
         raise ValueError("git_commit and model_id must be non-empty")
+    if type(git_dirty) is not bool:
+        raise TypeError("git_dirty must be an exact boolean")
+    if len(source_fixture_digest) != 64 or any(
+        character not in "0123456789abcdef" for character in source_fixture_digest
+    ):
+        raise ValueError("source_fixture_digest must be a lowercase SHA-256 hex digest")
     for name, value in (("input", input_rate), ("output", output_rate)):
         if type(value) is not Decimal or not value.is_finite() or value < 0:
             raise ValueError(f"{name} token rate must be a finite non-negative Decimal")
@@ -617,8 +783,11 @@ __all__ = [
     "GateReason",
     "LiveEvaluationUnavailable",
     "ReportReservation",
+    "SourceProvenance",
     "aggregate_payload",
     "build_offline_report",
+    "collect_source_provenance",
+    "is_complete_report_pair",
     "render_report",
     "reserve_report_slot",
     "write_report",

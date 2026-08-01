@@ -26,3 +26,5 @@ reports/eval-*.md
 reports/.eval-*.lock
 reports/.eval-*.json.tmp
 reports/.eval-*.md.tmp
+reports/.eval-*.complete
+reports/.eval-*.complete.tmp

@@ -20,8 +20,11 @@ from pilo_incident_investigator.evaluation.report import (
     EvaluationReport,
     LiveEvaluationUnavailable,
     ReportReservation,
+    SourceProvenance,
     aggregate_payload,
     build_offline_report,
+    collect_source_provenance,
+    is_complete_report_pair,
     render_report,
     reserve_report_slot,
     write_report,
@@ -42,6 +45,8 @@ def report() -> EvaluationReport:
         model_id="offline-deterministic-v1",
         input_cost_per_million=Decimal("0"),
         output_cost_per_million=Decimal("0"),
+        git_dirty=False,
+        source_fixture_digest="0" * 64,
     )
 
 
@@ -114,8 +119,11 @@ def test_report_rendering_is_stable_and_includes_metadata_gate_and_reasons(
         "generated_at": "2026-08-02T03:04:05Z",
         "git_commit": "f9180a210e9650bea4b96c551865e8d51bb1bb77",
         "input_cost_per_million": "0",
+        "baseline_eligible": True,
+        "git_dirty": False,
         "model_id": "offline-deterministic-v1",
         "output_cost_per_million": "0",
+        "source_fixture_digest": "0" * 64,
     }
     assert payload["operating_mode"] == "snapshot_only"
     assert payload["execution_kind"] == "offline_neutral_recording"
@@ -126,6 +134,8 @@ def test_report_rendering_is_stable_and_includes_metadata_gate_and_reasons(
     assert "운영 권장 모드: snapshot_only" in markdown
     assert "Execution kind: offline_neutral_recording" in markdown
     assert "Model called: false" in markdown
+    assert "Git dirty: false" in markdown
+    assert "Baseline eligible: true" in markdown
     assert "미측정" in markdown
     assert "주장하지 않습니다" in markdown
     assert all(f"`{metric_name}`" in markdown for metric_name in METRIC_NAMES)
@@ -144,6 +154,8 @@ def test_write_report_uses_timestamped_json_and_markdown_names(
     assert markdown_path.read_text(encoding="utf-8") == render_report(
         report, output_format="markdown"
     )
+    assert (tmp_path / ".eval-20260802T030405Z.complete").stat().st_size > 0
+    assert is_complete_report_pair(tmp_path, GENERATED_AT)
     assert b"\r\n" not in json_path.read_bytes()
     assert b"\r\n" not in markdown_path.read_bytes()
 
@@ -183,6 +195,48 @@ def test_second_temp_write_failure_leaves_no_final_pair(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_second_final_replace_interrupt_leaves_no_pair_or_marker(
+    report: EvaluationReport, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_replace = report_module._replace_file
+    calls = 0
+
+    def interrupt_second_replace(source: Path, destination: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        real_replace(source, destination)
+
+    monkeypatch.setattr(report_module, "_replace_file", interrupt_second_replace)
+
+    with pytest.raises(KeyboardInterrupt):
+        write_report(report, tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_final_looking_crash_residue_without_marker_is_incomplete(tmp_path: Path) -> None:
+    (tmp_path / "eval-20260802T030405Z.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "eval-20260802T030405Z.md").write_text("# report", encoding="utf-8")
+
+    assert not is_complete_report_pair(tmp_path, GENERATED_AT)
+
+
+def test_completion_marker_requires_both_nonempty_untampered_finals(
+    report: EvaluationReport, tmp_path: Path
+) -> None:
+    json_path, markdown_path = write_report(report, tmp_path)
+
+    assert json_path.stat().st_size > 0
+    assert markdown_path.stat().st_size > 0
+    assert is_complete_report_pair(tmp_path, GENERATED_AT)
+
+    markdown_path.write_text("", encoding="utf-8")
+
+    assert not is_complete_report_pair(tmp_path, GENERATED_AT)
+
+
 def test_preexisting_report_is_never_overwritten(report: EvaluationReport, tmp_path: Path) -> None:
     existing = tmp_path / "eval-20260802T030405Z.json"
     existing.write_bytes(b"preexisting")
@@ -194,6 +248,20 @@ def test_preexisting_report_is_never_overwritten(report: EvaluationReport, tmp_p
     assert not (tmp_path / "eval-20260802T030405Z.md").exists()
     assert not tuple(tmp_path.glob(".*.tmp"))
     assert not tuple(tmp_path.glob("*.lock"))
+
+
+def test_preexisting_completion_marker_is_never_overwritten(
+    report: EvaluationReport, tmp_path: Path
+) -> None:
+    marker = tmp_path / ".eval-20260802T030405Z.complete"
+    marker.write_bytes(b"preexisting-marker")
+
+    with pytest.raises(FileExistsError):
+        write_report(report, tmp_path)
+
+    assert marker.read_bytes() == b"preexisting-marker"
+    assert not tuple(tmp_path.glob("eval-*.json"))
+    assert not tuple(tmp_path.glob("eval-*.md"))
 
 
 def test_failed_write_does_not_remove_a_preexisting_temp(
@@ -217,6 +285,8 @@ def test_generated_report_residue_is_ignored_without_hiding_reviewed_baselines()
         reports_dir / ".eval-20990101T000000Z.lock",
         reports_dir / ".eval-20990101T000000Z.json.tmp",
         reports_dir / ".eval-20990101T000000Z.md.tmp",
+        reports_dir / ".eval-20990101T000000Z.complete",
+        reports_dir / ".eval-20990101T000000Z.complete.tmp",
         reports_dir / "eval-20990101T000000Z.json",
         reports_dir / "eval-20990101T000000Z.md",
     )
@@ -256,6 +326,69 @@ def test_generated_report_residue_is_ignored_without_hiding_reviewed_baselines()
     assert tracked_keep.returncode == 0
     assert tracked_keep.stdout.strip() == "reports/.gitkeep"
     assert baseline.returncode == 1
+
+
+def test_source_provenance_tracks_relevant_git_state_and_ignores_reports(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src" / "pilo_incident_investigator" / "evaluation" / "report.py"
+    script = tmp_path / "scripts" / "run_eval.py"
+    fixture = tmp_path / "fixtures" / "eval" / "manifest.yaml"
+    for path, content in (
+        (source, "SOURCE = 1\n"),
+        (script, "SCRIPT = 1\n"),
+        (fixture, "version: 1\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="\n")
+    (tmp_path / "reports").mkdir()
+    (tmp_path / ".gitignore").write_text(
+        "reports/eval-*.json\nreports/eval-*.md\n", encoding="utf-8", newline="\n"
+    )
+    _run_git(tmp_path, "init", "--quiet")
+    _run_git(tmp_path, "config", "user.email", "evaluation@example.invalid")
+    _run_git(tmp_path, "config", "user.name", "Evaluation Test")
+    _run_git(tmp_path, "add", ".")
+    _run_git(tmp_path, "commit", "--quiet", "-m", "baseline")
+
+    clean = collect_source_provenance(tmp_path)
+    head = _run_git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    (tmp_path / "reports" / "eval-20990101T000000Z.json").write_text("{}", encoding="utf-8")
+    ignored_report = collect_source_provenance(tmp_path)
+    source.write_text("SOURCE = 2\n", encoding="utf-8", newline="\n")
+    modified = collect_source_provenance(tmp_path)
+    _run_git(tmp_path, "add", source.relative_to(tmp_path).as_posix())
+    staged = collect_source_provenance(tmp_path)
+    untracked_fixture = tmp_path / "fixtures" / "eval" / "new.yaml"
+    untracked_fixture.write_text("version: 2\n", encoding="utf-8", newline="\n")
+    untracked = collect_source_provenance(tmp_path)
+
+    assert clean.git_commit == head
+    assert clean.git_dirty is False
+    assert len(clean.source_fixture_digest) == 64
+    assert ignored_report == clean
+    assert modified.git_commit == staged.git_commit == untracked.git_commit == head
+    assert modified.git_dirty is staged.git_dirty is untracked.git_dirty is True
+    assert modified.source_fixture_digest != clean.source_fixture_digest
+    assert untracked.source_fixture_digest != staged.source_fixture_digest
+
+
+def test_dirty_report_is_never_baseline_eligible(report: EvaluationReport) -> None:
+    dirty = replace(report, git_dirty=True)
+    json_payload = json.loads(render_report(dirty, output_format="json"))
+    stdout_payload = aggregate_payload(dirty)
+    markdown = render_report(dirty, output_format="markdown")
+
+    assert json_payload["metadata"]["git_commit"] == report.git_commit
+    assert json_payload["metadata"]["git_dirty"] is True
+    assert json_payload["metadata"]["source_fixture_digest"] == "0" * 64
+    assert json_payload["metadata"]["baseline_eligible"] is False
+    assert stdout_payload["git_dirty"] is True
+    assert stdout_payload["source_fixture_digest"] == "0" * 64
+    assert stdout_payload["baseline_eligible"] is False
+    assert "Git dirty: true" in markdown
+    assert "Baseline eligible: false" in markdown
+    assert "baseline 부적격" in markdown
 
 
 @pytest.mark.parametrize(
@@ -325,25 +458,38 @@ def test_live_cli_rejects_whitespace_only_model_id(
 
 
 def test_offline_cli_prints_only_aggregate_metrics_and_writes_reports(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        run_eval_module,
+        "collect_source_provenance",
+        lambda root: SourceProvenance("a" * 40, True, "1" * 64),
+    )
     exit_code = main(["--reports-dir", str(tmp_path)])
 
     assert exit_code == 0
     stdout = capsys.readouterr().out
     payload = json.loads(stdout)
     assert set(payload) == {
+        "baseline_eligible",
         "execution_kind",
         "gate_reasons",
+        "git_dirty",
         "handoff",
         "hybrid_agent",
         "measurement_notice",
         "model_called",
         "operating_mode",
         "snapshot_only",
+        "source_fixture_digest",
     }
     assert payload["execution_kind"] == "offline_neutral_recording"
     assert payload["model_called"] is False
+    assert payload["git_dirty"] is True
+    assert payload["source_fixture_digest"] == "1" * 64
+    assert payload["baseline_eligible"] is False
     assert "미측정" in payload["measurement_notice"]
     assert "주장하지 않습니다" in payload["measurement_notice"]
     assert "ecs-oom-complete" not in stdout
@@ -379,3 +525,13 @@ def test_concurrent_offline_cli_runs_publish_distinct_complete_pairs(
     assert {path.stem for path in json_paths} == {path.stem for path in markdown_paths}
     assert not tuple(tmp_path.glob("*.lock"))
     assert not tuple(tmp_path.glob(".*.tmp"))
+
+
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

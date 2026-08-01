@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -22,6 +21,7 @@ from pilo_incident_investigator.evaluation.report import (  # noqa: E402
     LiveEvaluationUnavailable,
     aggregate_payload,
     build_offline_report,
+    collect_source_provenance,
     write_reserved_report,
 )
 from pilo_incident_investigator.evaluation.report import (  # noqa: E402
@@ -47,12 +47,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     reports_dir = args.reports_dir.resolve()
+    provenance = collect_source_provenance(ROOT)
     reservation = reserve_report_slot(reports_dir, _utc_now())
     try:
         report = build_offline_report(
             load_manifest(ROOT / "fixtures" / "eval" / "manifest.yaml"),
             generated_at=reservation.generated_at,
-            git_commit=_git_commit(),
+            git_commit=provenance.git_commit,
+            git_dirty=provenance.git_dirty,
+            source_fixture_digest=provenance.source_fixture_digest,
             model_id=OFFLINE_MODEL_ID,
             input_cost_per_million=Decimal("0"),
             output_cost_per_million=Decimal("0"),
@@ -84,20 +87,6 @@ def _token_rate(value: str) -> Decimal:
     if not rate.is_finite() or rate < 0:
         raise argparse.ArgumentTypeError("token rate must be finite and non-negative")
     return rate
-
-
-def _git_commit() -> str:
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    commit = completed.stdout.strip()
-    if not commit:
-        raise RuntimeError("git commit could not be determined")
-    return commit
 
 
 def _utc_now() -> datetime:
