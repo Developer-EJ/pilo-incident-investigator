@@ -83,19 +83,42 @@ def test_duplicate_service_key_is_rejected() -> None:
         Topology.load(yaml.safe_dump(raw))
 
 
-def test_duplicate_service_resources_are_rejected() -> None:
+def test_duplicate_ecs_service_is_rejected() -> None:
     text = (FIXTURE_DIR / "duplicate.yaml").read_text(encoding="utf-8")
 
     with pytest.raises(TopologyError, match="duplicate resource"):
         Topology.load(text)
 
 
-@pytest.mark.parametrize("field", ["rds_instances", "secrets", "queues"])
-def test_duplicate_extended_resources_are_rejected(field: str) -> None:
+def test_resources_shared_by_multiple_services_are_allowed() -> None:
     raw = yaml.safe_load((FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8"))
-    raw["services"][1][field] = raw["services"][0][field]
+    first_service = raw["services"][0]
+    second_service = raw["services"][1]
+    shared_fields = (
+        "log_groups",
+        "target_groups",
+        "rds_instances",
+        "secrets",
+        "queues",
+        "github_repository",
+    )
+    for field in shared_fields:
+        second_service[field] = first_service[field]
 
-    with pytest.raises(TopologyError, match="duplicate resource"):
+    topology = Topology.load(yaml.safe_dump(raw))
+
+    assert topology.services[1].rds_instances == topology.services[0].rds_instances
+    assert topology.services[1].github_repository == topology.services[0].github_repository
+
+
+@pytest.mark.parametrize(
+    "field", ["log_groups", "target_groups", "rds_instances", "secrets", "queues"]
+)
+def test_duplicate_resource_within_one_service_is_rejected(field: str) -> None:
+    raw = yaml.safe_load((FIXTURE_DIR / "valid.yaml").read_text(encoding="utf-8"))
+    raw["services"][0][field].append(raw["services"][0][field][0])
+
+    with pytest.raises(TopologyError, match=f"{field} must not contain duplicates"):
         Topology.load(yaml.safe_dump(raw))
 
 

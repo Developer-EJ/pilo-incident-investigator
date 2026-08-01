@@ -82,7 +82,7 @@ class Topology:
         service_keys = [service.key for service in services]
         if len(service_keys) != len(set(service_keys)):
             raise TopologyError("service keys must be unique")
-        _reject_duplicate_service_resources(services)
+        _reject_duplicate_ecs_services(services)
 
         alarms = raw.get("alarms")
         if not isinstance(alarms, dict):
@@ -180,19 +180,10 @@ def _build_allowed_resources(
     }
 
 
-def _reject_duplicate_service_resources(services: tuple[ServiceTopology, ...]) -> None:
-    resource_groups = {
-        "ecs_service": [service.ecs_service for service in services],
-        "log_group": [item for service in services for item in service.log_groups],
-        "target_group": [item for service in services for item in service.target_groups],
-        "rds_instance": [item for service in services for item in service.rds_instances],
-        "secret": [item for service in services for item in service.secrets],
-        "queue": [item for service in services for item in service.queues],
-        "github_repository": [service.github_repository for service in services],
-    }
-    for resource_type, resources in resource_groups.items():
-        if len(resources) != len(set(resources)):
-            raise TopologyError(f"duplicate resource identifier for {resource_type}")
+def _reject_duplicate_ecs_services(services: tuple[ServiceTopology, ...]) -> None:
+    ecs_services = [service.ecs_service for service in services]
+    if len(ecs_services) != len(set(ecs_services)):
+        raise TopologyError("duplicate resource identifier for ecs_service")
 
 
 def main(argv: list[str] | None = None) -> int:
