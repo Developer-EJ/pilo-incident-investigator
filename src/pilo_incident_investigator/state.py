@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from time import time
 from typing import Any, Protocol
@@ -301,11 +302,11 @@ class DynamoIncidentStateStore:
                 response = self._table.get_item(Key={"event_id": event_id}, ConsistentRead=True)
                 item = response.get("Item")
                 if isinstance(item, dict):
-                    rank = item.get("checkpoint_rank")
+                    rank = _dynamo_integer(item.get("checkpoint_rank"))
                     return (
                         item.get("attempt_id") == attempt_id
                         and item.get("processing_status") == ProcessingStatus.PROCESSING.value
-                        and isinstance(rank, int)
+                        and rank is not None
                         and rank >= _CHECKPOINT_RANK[checkpoint]
                     )
                 return False
@@ -336,6 +337,16 @@ def _new_event_item(
         "attempt_id": attempt_id,
         "lease_expires_at": lease_expires_at,
     }
+
+
+def _dynamo_integer(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value():
+        return int(value)
+    return None
 
 
 def _is_conditional_failure(error: ClientError) -> bool:

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, cast
 
 from botocore.exceptions import ClientError
@@ -79,7 +80,13 @@ class InMemoryConditionalTable:
     def get_item(self, **kwargs: Any) -> dict[str, Any]:
         self.get_calls.append(kwargs)
         item = self.items.get(kwargs["Key"]["event_id"])
-        return {} if item is None else {"Item": dict(item)}
+        if item is None:
+            return {}
+        dynamo_item = dict(item)
+        for field in ("checkpoint_rank", "lease_expires_at"):
+            if isinstance(dynamo_item.get(field), int):
+                dynamo_item[field] = Decimal(cast(int, dynamo_item[field]))
+        return {"Item": dynamo_item}
 
 
 def conditional_failure() -> ClientError:
