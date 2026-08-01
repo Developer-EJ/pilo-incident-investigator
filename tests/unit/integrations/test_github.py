@@ -84,13 +84,29 @@ def test_client_repr_never_contains_token() -> None:
     assert "synthetic-token" not in repr(client)
 
 
-@pytest.mark.parametrize("repository", ["not-a-pair", "owner/repo/extra", "owner/../repo"])
+@pytest.mark.parametrize(
+    "repository",
+    ["not-a-pair", "owner/repo/extra", "owner/..", "../repo", "owner/.", "./repo"],
+)
 def test_invalid_repository_is_rejected_before_http(repository: str) -> None:
     transport = RecordingTransport(HttpResponse(status=200, body=b"[]"))
     client = GitHubClient("synthetic-token", transport=transport)
 
     with pytest.raises(ValueError, match="repository"):
         client.recent_deployments(repository, since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    assert transport.calls == []
+
+
+def test_non_github_api_origin_is_rejected_before_http() -> None:
+    transport = RecordingTransport(HttpResponse(status=200, body=b"[]"))
+
+    with pytest.raises(ValueError, match="GitHub API origin"):
+        GitHubClient(
+            "synthetic-token",
+            transport=transport,
+            api_base="http://attacker.invalid",
+        )
 
     assert transport.calls == []
 

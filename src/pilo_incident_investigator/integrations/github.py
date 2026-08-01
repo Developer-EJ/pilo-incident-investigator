@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 MAX_DEPLOYMENTS = 10
 MAX_RESPONSE_BYTES = 1_000_000
 REQUEST_TIMEOUT_SECONDS = 5.0
+GITHUB_API_BASE = "https://api.github.com"
 _REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
@@ -68,16 +69,21 @@ class GitHubClient:
         token: str,
         *,
         transport: HttpTransport | None = None,
-        api_base: str = "https://api.github.com",
+        api_base: str = GITHUB_API_BASE,
     ) -> None:
         if not token:
             raise ValueError("GitHub token must be non-empty")
+        if api_base.rstrip("/") != GITHUB_API_BASE:
+            raise ValueError("GitHub API origin must be the official HTTPS endpoint")
         self._token = token
         self._transport = transport or _UrlLibTransport()
-        self._api_base = api_base.rstrip("/")
+        self._api_base = GITHUB_API_BASE
 
     def recent_deployments(self, repository: str, since: datetime) -> tuple[Deployment, ...]:
-        if _REPOSITORY_PATTERN.fullmatch(repository) is None:
+        segments = repository.split("/")
+        if _REPOSITORY_PATTERN.fullmatch(repository) is None or any(
+            segment in {".", ".."} for segment in segments
+        ):
             raise ValueError("repository must be an owner/name pair")
         if since.tzinfo is None or since.utcoffset() is None:
             raise ValueError("since must be timezone-aware")
