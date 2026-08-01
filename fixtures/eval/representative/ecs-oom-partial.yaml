@@ -1,0 +1,60 @@
+fixture_id: "ecs-oom-partial"
+scenario: "ecs_oom"
+variant: "partial"
+alarm: {"event_id":"evt-006","alarm_arn":"arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-incident-alarm","alarm_name":"synthetic-incident-alarm","state_timestamp":"2026-01-01T00:10:00Z","detail":{"alarmName":"synthetic-incident-alarm","state":{"value":"ALARM","reason":"synthetic threshold breached: 95 >= 90","timestamp":"2026-01-01T00:10:00Z"},"previousState":{"value":"OK","reason":"synthetic metric within threshold","timestamp":"2026-01-01T00:09:00Z"},"configuration":{"metrics":[{"id":"m1","metricStat":{"metric":{"namespace":"PILO/Synthetic","name":"MemoryUtilization","dimensions":{"ClusterName":"pilo-dev-cluster","ServiceName":"pilo-dev-service-01"}},"period":60,"stat":"Average"},"returnData":true}]}}}
+topology:
+  version: 1
+  environment: dev
+  region: ap-northeast-2
+  services:
+    - {"key":"pilo-dev-service-01","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-01","log_groups":["/aws/ecs/pilo-dev-service-01"],"target_groups":["pilo-dev-target-01"],"rds_instances":["pilo-dev-db-01"],"secrets":["pilo-dev-secret-01"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01"],"github_repository":"synthetic-org/pilo-dev-service-01"}
+    - {"key":"pilo-dev-service-02","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-02","log_groups":["/aws/ecs/pilo-dev-service-02"],"target_groups":["pilo-dev-target-02"],"rds_instances":["pilo-dev-db-02"],"secrets":["pilo-dev-secret-02"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-02"],"github_repository":"synthetic-org/pilo-dev-service-02"}
+    - {"key":"pilo-dev-service-03","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-03","log_groups":["/aws/ecs/pilo-dev-service-03"],"target_groups":["pilo-dev-target-03"],"rds_instances":["pilo-dev-db-03"],"secrets":["pilo-dev-secret-03"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-03"],"github_repository":"synthetic-org/pilo-dev-service-03"}
+    - {"key":"pilo-dev-service-04","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-04","log_groups":["/aws/ecs/pilo-dev-service-04"],"target_groups":["pilo-dev-target-04"],"rds_instances":["pilo-dev-db-04"],"secrets":["pilo-dev-secret-04"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-04"],"github_repository":"synthetic-org/pilo-dev-service-04"}
+    - {"key":"pilo-dev-service-05","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-05","log_groups":["/aws/ecs/pilo-dev-service-05"],"target_groups":["pilo-dev-target-05"],"rds_instances":["pilo-dev-db-05"],"secrets":["pilo-dev-secret-05"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-05"],"github_repository":"synthetic-org/pilo-dev-service-05"}
+    - {"key":"pilo-dev-service-06","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-06","log_groups":["/aws/ecs/pilo-dev-service-06"],"target_groups":["pilo-dev-target-06"],"rds_instances":["pilo-dev-db-06"],"secrets":["pilo-dev-secret-06"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-06"],"github_repository":"synthetic-org/pilo-dev-service-06"}
+    - {"key":"pilo-dev-service-07","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-07","log_groups":["/aws/ecs/pilo-dev-service-07"],"target_groups":["pilo-dev-target-07"],"rds_instances":["pilo-dev-db-07"],"secrets":["pilo-dev-secret-07"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-07"],"github_repository":"synthetic-org/pilo-dev-service-07"}
+    - {"key":"pilo-dev-service-08","ecs_cluster":"pilo-dev-cluster","ecs_service":"pilo-dev-service-08","log_groups":["/aws/ecs/pilo-dev-service-08"],"target_groups":["pilo-dev-target-08"],"rds_instances":["pilo-dev-db-08"],"secrets":["pilo-dev-secret-08"],"queues":["https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-08"],"github_repository":"synthetic-org/pilo-dev-service-08"}
+  alarms:
+    "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-incident-alarm": ["pilo-dev-service-01"]
+snapshot:
+  incident_id: "inc-5c91274912512fe8b336"
+  evidence:
+    - {"evidence_id":"E-001","source":"ecs.describe_services","observed_at":"2026-01-01T00:10:00Z","summary":"target ECS state","data":{"service":"pilo-dev-service-01","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-002","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-01","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-003","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-02","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-004","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-03","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-005","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-04","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-006","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-05","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-007","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-06","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-008","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-07","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-009","source":"ecs.describe_services.all_pilo","observed_at":"2026-01-01T00:10:00Z","summary":"PILO service running state","data":{"service":"pilo-dev-service-08","desired":1,"running":1,"pending":0}}
+    - {"evidence_id":"E-010","source":"ecs.describe_tasks","observed_at":"2026-01-01T00:10:00Z","summary":"stopped ECS task","data":{"service":"pilo-dev-service-01","task":"arn:aws:ecs:ap-northeast-2:000000000000:task/pilo-dev-cluster/00000000000000000000000000000001","stop_code":"EssentialContainerExited"}}
+    - {"evidence_id":"E-011","source":"elbv2.describe_target_health","observed_at":"2026-01-01T00:10:00Z","summary":"ALB target health","data":{"service":"pilo-dev-service-01","target_group":"pilo-dev-target-01","states":["healthy"]}}
+    - {"evidence_id":"E-012","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic container memory limit reached"}}
+    - {"evidence_id":"E-013","source":"logs.filter_log_events","observed_at":"2026-01-01T00:10:00Z","summary":"bounded service log event","data":{"service":"pilo-dev-service-01","log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic container process exited with code 137"}}
+    - {"evidence_id":"E-014","source":"rds.describe_db_instances","observed_at":"2026-01-01T00:10:00Z","summary":"RDS basic status","data":{"database":"pilo-dev-db-01","status":"available"}}
+  failures:
+    - {"collector":"recent_github_deployments","code":"synthetic_timeout","detail":"synthetic recent_github_deployments collection timed out"}
+tool_results:
+  service-log-search:
+    request: {"tool":"service_log_search","resource_key":"/aws/ecs/pilo-dev-service-01","parameters":{},"reason":"E-001 supports this bounded read-only lookup."}
+    evidence:
+      - {"evidence_id":"tool-local-service-log-search-ba1bcdf6a405dd96-1","source":"service_log_search","observed_at":"2026-01-01T00:10:00Z","summary":"service log event","data":{"log_group":"/aws/ecs/pilo-dev-service-01","timestamp":1767226200000,"message":"synthetic memory diagnostic sample captured","log_stream":"synthetic/service-01/memory"}}
+    failure: null
+  github-changed-files:
+    request: {"tool":"github_changed_files","resource_key":"synthetic-org/pilo-dev-service-01","parameters":{},"reason":"E-001 supports this bounded read-only lookup."}
+    evidence:
+      - {"evidence_id":"tool-local-github-changed-files-cd5e3383c8fa9d01-1","source":"github_changed_files","observed_at":"2026-01-01T00:10:00Z","summary":"GitHub changed file","data":{"repository":"synthetic-org/pilo-dev-service-01","path":"service-config.yaml","status":"modified"}}
+    failure: null
+expected:
+  required_evidence_ids: ["E-010","E-013","E-012"]
+  acceptable_direction_labels: ["inspect_task_memory_and_recent_change"]
+  useful_tools: ["service_log_search","github_changed_files"]
+  classification: "ecs_resource_exhaustion"
+  facts:
+    - {"text":"synthetic task stop evidence indicates memory exhaustion","evidence_ids":["E-010","E-013","E-012"]}
+  missing_information: ["recent_github_deployments collector unavailable; bounded github_changed_files Tool evidence preserves recent change context"]
+handoff:
+  acceptable_first_direction_labels: ["inspect_task_memory_and_recent_change"]
+  allowed_clarification_kinds: ["request_missing_evidence"]

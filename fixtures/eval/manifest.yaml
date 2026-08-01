@@ -1,0 +1,20 @@
+version: 1
+fixtures:
+  - {"fixture_id":"rds-secret-rotation-auth-complete","path":"representative/rds-secret-rotation-auth-complete.yaml","scenario":"rds_secret_rotation_auth","variant":"complete"}
+  - {"fixture_id":"rds-secret-rotation-auth-noisy","path":"representative/rds-secret-rotation-auth-noisy.yaml","scenario":"rds_secret_rotation_auth","variant":"noisy"}
+  - {"fixture_id":"rds-secret-rotation-auth-partial","path":"representative/rds-secret-rotation-auth-partial.yaml","scenario":"rds_secret_rotation_auth","variant":"partial"}
+  - {"fixture_id":"ecs-oom-complete","path":"representative/ecs-oom-complete.yaml","scenario":"ecs_oom","variant":"complete"}
+  - {"fixture_id":"ecs-oom-noisy","path":"representative/ecs-oom-noisy.yaml","scenario":"ecs_oom","variant":"noisy"}
+  - {"fixture_id":"ecs-oom-partial","path":"representative/ecs-oom-partial.yaml","scenario":"ecs_oom","variant":"partial"}
+  - {"fixture_id":"alb-health-check-complete","path":"representative/alb-health-check-complete.yaml","scenario":"alb_health_check","variant":"complete"}
+  - {"fixture_id":"alb-health-check-noisy","path":"representative/alb-health-check-noisy.yaml","scenario":"alb_health_check","variant":"noisy"}
+  - {"fixture_id":"alb-health-check-partial","path":"representative/alb-health-check-partial.yaml","scenario":"alb_health_check","variant":"partial"}
+  - {"fixture_id":"deployment-regression-complete","path":"representative/deployment-regression-complete.yaml","scenario":"deployment_regression","variant":"complete"}
+  - {"fixture_id":"deployment-regression-noisy","path":"representative/deployment-regression-noisy.yaml","scenario":"deployment_regression","variant":"noisy"}
+  - {"fixture_id":"deployment-regression-partial","path":"representative/deployment-regression-partial.yaml","scenario":"deployment_regression","variant":"partial"}
+  - {"fixture_id":"sqs-backlog-complete","path":"representative/sqs-backlog-complete.yaml","scenario":"sqs_backlog","variant":"complete"}
+  - {"fixture_id":"sqs-backlog-noisy","path":"representative/sqs-backlog-noisy.yaml","scenario":"sqs_backlog","variant":"noisy"}
+  - {"fixture_id":"sqs-backlog-partial","path":"representative/sqs-backlog-partial.yaml","scenario":"sqs_backlog","variant":"partial"}
+  - {"fixture_id":"external-api-rate-limit-complete","path":"representative/external-api-rate-limit-complete.yaml","scenario":"external_api_rate_limit","variant":"complete"}
+  - {"fixture_id":"external-api-rate-limit-noisy","path":"representative/external-api-rate-limit-noisy.yaml","scenario":"external_api_rate_limit","variant":"noisy"}
+  - {"fixture_id":"external-api-rate-limit-partial","path":"representative/external-api-rate-limit-partial.yaml","scenario":"external_api_rate_limit","variant":"partial"}
