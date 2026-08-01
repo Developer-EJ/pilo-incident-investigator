@@ -77,24 +77,20 @@ variable "bedrock_foundation_model_arns" {
   }
 }
 
-variable "topology_bucket_arn" {
-  description = "Existing private bucket ARN containing the protected topology object."
+variable "topology_object_key" {
+  description = "Protected pilo-topology.yaml key in the service-owned private bucket."
   type        = string
 
   validation {
-    condition     = can(regex("^arn:aws:s3:::[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.topology_bucket_arn))
-    error_message = "topology_bucket_arn must be one concrete S3 bucket ARN."
+    condition     = length(var.topology_object_key) > 0 && length(var.topology_object_key) <= 1024 && !startswith(var.topology_object_key, "/") && !startswith(var.topology_object_key, "incidents/") && !strcontains(var.topology_object_key, "..") && !strcontains(var.topology_object_key, "\\") && !strcontains(var.topology_object_key, "*") && !strcontains(var.topology_object_key, "?")
+    error_message = "topology_object_key must be a bounded relative S3 key outside the expiring incidents/ prefix."
   }
 }
 
-variable "topology_object_key" {
-  description = "Existing protected pilo-topology.yaml object key."
-  type        = string
-
-  validation {
-    condition     = length(var.topology_object_key) > 0 && length(var.topology_object_key) <= 1024 && !startswith(var.topology_object_key, "/") && !strcontains(var.topology_object_key, "..") && !strcontains(var.topology_object_key, "\\") && !strcontains(var.topology_object_key, "*") && !strcontains(var.topology_object_key, "?")
-    error_message = "topology_object_key must be a bounded relative S3 key."
-  }
+variable "event_route_enabled" {
+  description = "Enable the Alarm route only after the protected topology object is uploaded and verified."
+  type        = bool
+  default     = false
 }
 
 variable "incident_repository" {

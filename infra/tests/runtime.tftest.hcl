@@ -19,7 +19,6 @@ variables {
   bedrock_foundation_model_arns = [
     "arn:aws:bedrock:ap-northeast-1::foundation-model/synthetic.model-v1",
   ]
-  topology_bucket_arn         = "arn:aws:s3:::pilo-protected-topology"
   topology_object_key         = "config/pilo-topology.yaml"
   incident_repository         = "synthetic-org/private-incidents"
   github_token_parameter_arn  = "arn:aws:ssm:ap-northeast-2:000000000000:parameter/pilo/investigator/github-token"
@@ -76,6 +75,24 @@ run "runtime_resources_are_bounded" {
   }
 
   assert {
+    condition     = aws_cloudwatch_event_rule.alarm.state == "DISABLED"
+    error_message = "The Alarm route must remain disabled until protected topology is uploaded and verified."
+  }
+
+  assert {
+    condition     = aws_lambda_function.investigator.environment[0].variables.PILO_TOPOLOGY_BUCKET == "pilo-incident-investigator-000000000000-ap-northeast-2"
+    error_message = "Protected topology must live in the service-owned private bucket."
+  }
+
+  assert {
+    condition = anytrue([
+      for statement in data.aws_iam_policy_document.runtime.statement :
+      statement.sid == "ReadProtectedTopology" && toset(statement.resources) == toset(["arn:aws:s3:::pilo-incident-investigator-000000000000-ap-northeast-2/${var.topology_object_key}"])
+    ])
+    error_message = "Topology read access must be limited to the exact service-owned object."
+  }
+
+  assert {
     condition     = aws_lambda_function.investigator.source_code_hash == filebase64sha256(var.lambda_zip_path)
     error_message = "Terraform must detect Lambda artifact content changes at a stable path."
   }
@@ -91,6 +108,19 @@ run "hybrid_agent_mode_is_explicitly_supported" {
   assert {
     condition     = aws_lambda_function.investigator.environment[0].variables.PILO_MODE == "hybrid_agent"
     error_message = "The evaluated hybrid mode must reach the Lambda environment unchanged."
+  }
+}
+
+run "alarm_route_enablement_is_explicit" {
+  command = plan
+
+  variables {
+    event_route_enabled = true
+  }
+
+  assert {
+    condition     = aws_cloudwatch_event_rule.alarm.state == "ENABLED"
+    error_message = "The Alarm route must be enabled only by an explicit second-stage input."
   }
 }
 
@@ -135,6 +165,16 @@ run "wildcard_topology_key_is_rejected" {
 
   variables {
     topology_object_key = "config/*"
+  }
+
+  expect_failures = [var.topology_object_key]
+}
+
+run "expiring_topology_key_is_rejected" {
+  command = plan
+
+  variables {
+    topology_object_key = "incidents/pilo-topology.yaml"
   }
 
   expect_failures = [var.topology_object_key]

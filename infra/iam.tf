@@ -27,7 +27,7 @@ data "aws_iam_policy_document" "runtime" {
     sid       = "ReadProtectedTopology"
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = ["${var.topology_bucket_arn}/${var.topology_object_key}"]
+    resources = ["arn:aws:s3:::${local.bundle_bucket_name}/${var.topology_object_key}"]
   }
 
   statement {

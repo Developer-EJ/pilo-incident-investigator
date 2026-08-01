@@ -18,7 +18,7 @@ composite alarm, PILO 애플리케이션 alarm 및 ECS·ALB·RDS·SQS·Secret �
 
 ## 1. 변경 없는 사전 점검과 공통 함수
 
-승인된 보호 실행 환경에는 PILO_DEV_ACCOUNT_ID, PILO_SYNTHETIC_ALARM_ARN, PILO_GITHUB_TOKEN_PARAMETER_ARN, PILO_SLACK_WEBHOOK_PARAMETER_ARN, PILO_BEDROCK_MODEL_ARN, PILO_INCIDENT_REPOSITORY, PILO_TOPOLOGY_FILE, PILO_TOPOLOGY_BUCKET, PILO_TOPOLOGY_KEY를 설정한다. 두 SSM input은 parameter ARN이며 token/webhook 값이나 parameter name input이 아니다. Bedrock input은 ap-northeast-2의 foundation model ARN 또는 승인된 dev account의 inference/application inference profile ARN이어야 한다.
+승인된 보호 실행 환경에는 PILO_DEV_ACCOUNT_ID, PILO_SYNTHETIC_ALARM_ARN, PILO_GITHUB_TOKEN_PARAMETER_ARN, PILO_SLACK_WEBHOOK_PARAMETER_ARN, PILO_BEDROCK_MODEL_ARN, PILO_INCIDENT_REPOSITORY, PILO_TOPOLOGY_FILE, PILO_TOPOLOGY_KEY를 설정한다. topology bucket은 별도 입력으로 받지 않고 Terraform이 생성한 service-owned private bucket output으로 고정한다. 두 SSM input은 parameter ARN이며 token/webhook 값이나 parameter name input이 아니다. Bedrock input은 ap-northeast-2의 foundation model ARN 또는 승인된 dev account의 inference/application inference profile ARN이어야 한다.
 
 ~~~powershell
 Set-StrictMode -Version Latest
@@ -31,7 +31,7 @@ $SyntheticMetricName = "Trigger"
 foreach ($name in @(
   "PILO_DEV_ACCOUNT_ID", "PILO_SYNTHETIC_ALARM_ARN",
   "PILO_GITHUB_TOKEN_PARAMETER_ARN", "PILO_SLACK_WEBHOOK_PARAMETER_ARN", "PILO_BEDROCK_MODEL_ARN",
-  "PILO_INCIDENT_REPOSITORY", "PILO_TOPOLOGY_FILE", "PILO_TOPOLOGY_BUCKET", "PILO_TOPOLOGY_KEY"
+  "PILO_INCIDENT_REPOSITORY", "PILO_TOPOLOGY_FILE", "PILO_TOPOLOGY_KEY"
 )) {
   $protectedValue = [Environment]::GetEnvironmentVariable($name)
   if ([string]::IsNullOrWhiteSpace($protectedValue)) { throw "A required protected input is missing" }
@@ -174,7 +174,7 @@ function Get-ApprovedSyntheticMetricAlarm {
   return $alarm
 }
 
-function Assert-ProtectedTopologyBinding {
+function Assert-ProtectedTopologyFile {
   & python -m pilo_incident_investigator.topology validate $env:PILO_TOPOLOGY_FILE *> $null
   if ($LASTEXITCODE -ne 0) { throw "Protected topology validation failed" }
   $topologyMappingCheck = @'
@@ -186,13 +186,18 @@ raise SystemExit(0 if topology.resolve_alarm(os.environ["PILO_SYNTHETIC_ALARM_AR
 '@
   & python -c $topologyMappingCheck *> $null
   if ($LASTEXITCODE -ne 0) { throw "Protected topology does not map the synthetic alarm" }
+}
+
+function Assert-ProtectedTopologyBinding {
+  Assert-ProtectedTopologyFile
+  if ([string]::IsNullOrWhiteSpace($env:PILO_TOPOLOGY_BUCKET)) { throw "Terraform-owned topology bucket is unavailable" }
   $topologyHead = Get-AwsJson @("s3api", "head-object", "--bucket", $env:PILO_TOPOLOGY_BUCKET, "--key", $env:PILO_TOPOLOGY_KEY, "--checksum-mode", "ENABLED", "--region", "ap-northeast-2", "--output", "json") "Protected topology metadata check failed"
   $sha256 = [Security.Cryptography.SHA256]::Create()
   try { $localTopologyChecksum = [Convert]::ToBase64String($sha256.ComputeHash([IO.File]::ReadAllBytes($env:PILO_TOPOLOGY_FILE))) } finally { $sha256.Dispose() }
   if ($topologyHead.ServerSideEncryption -ne "AES256" -or [int64]$topologyHead.ContentLength -lt 1 -or [string]::IsNullOrWhiteSpace($topologyHead.ChecksumSHA256) -or $topologyHead.ChecksumSHA256 -ne $localTopologyChecksum) { throw "Protected topology object does not match the validated local input" }
 }
 
-function Assert-RuntimeBinding {
+function Assert-RuntimeBinding([ValidateSet("DISABLED", "ENABLED")][string]$ExpectedRuleState) {
   Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN "/pilo-incident-investigator/dev/github-token"
   Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN "/pilo-incident-investigator/dev/slack-webhook-url"
   Assert-ProtectedTopologyBinding
@@ -217,7 +222,7 @@ function Assert-RuntimeBinding {
   }
   Assert-PrivateIncidentRepository
   $rule = Get-AwsJson @("events", "describe-rule", "--name", $eventRule, "--region", "ap-northeast-2", "--output", "json") "EventBridge rule inspection failed"
-  if ($rule.State -ne "ENABLED") { throw "EventBridge rule must be enabled" }
+  if ($rule.State -ne $ExpectedRuleState) { throw "EventBridge rule state does not match the approved deployment stage" }
   try { $pattern = $rule.EventPattern | ConvertFrom-Json -ErrorAction Stop } catch { throw "EventBridge rule pattern is invalid" }
   Assert-ExactObjectKeys $pattern @("source", "detail-type", "region", "resources", "detail") "EventBridge event pattern keys are invalid"
   Assert-ExactObjectKeys $pattern.detail @("state") "EventBridge detail keys are invalid"
@@ -288,12 +293,12 @@ Assert-ApprovedAccount
 Assert-PrivateIncidentRepository
 Assert-ApprovedSsmParameter $env:PILO_GITHUB_TOKEN_PARAMETER_ARN "/pilo-incident-investigator/dev/github-token"
 Assert-ApprovedSsmParameter $env:PILO_SLACK_WEBHOOK_PARAMETER_ARN "/pilo-incident-investigator/dev/slack-webhook-url"
-Assert-ProtectedTopologyBinding
+Assert-ProtectedTopologyFile
 $originalAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
 $originalState = $originalAlarm.StateValue
 ~~~
 
-위 S3 확인은 head-object checksum-mode ENABLED metadata만 사용한다. Bundle bucket에 topology를 업로드·복사하거나 topology 본문을 출력하지 않는다.
+사전 점검은 로컬 topology의 schema와 synthetic Alarm mapping만 확인한다. topology object는 아직 생성되지 않은 Terraform-owned private bucket에 배치되므로 plan 전에 S3를 조회하거나 다른 PILO 버킷을 빌려 쓰지 않는다.
 
 set-alarm-state는 action을 실행할 수 있으므로 alarm ownership, action-free, OK gate 중 하나라도 실패하면 중단한다. metric alarm은 실제 metric 평가로 상태가 돌아갈 수 있지만 자동 복귀를 보장으로 취급하지 않는다.
 
@@ -305,6 +310,7 @@ if ($LASTEXITCODE -ne 0) { throw "Saved Terraform plan path must be ignored" }
 python scripts/build_lambda.py
 if ($LASTEXITCODE -ne 0) { throw "Lambda artifact build failed" }
 Assert-ApprovedAccount
+$env:TF_VAR_event_route_enabled = "false"
 terraform -chdir=infra plan -out saved-dev.tfplan
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
 ~~~
@@ -323,11 +329,39 @@ $bundleBucket = Get-TerraformOutput "bundle_bucket_name"
 $stateTable = Get-TerraformOutput "state_table_name"
 $lambdaFunction = Get-TerraformOutput "lambda_function_name"
 $eventRule = Get-TerraformOutput "event_rule_name"
+$env:PILO_TOPOLOGY_BUCKET = $bundleBucket
+& aws s3api put-object --bucket $bundleBucket --key $env:PILO_TOPOLOGY_KEY --body $env:PILO_TOPOLOGY_FILE --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
+if ($LASTEXITCODE -ne 0) { throw "Protected topology upload failed" }
 $lambdaConfiguration = Get-AwsJson @("lambda", "get-function-configuration", "--function-name", $lambdaFunction, "--region", "ap-northeast-2", "--output", "json") "Lambda configuration bootstrap check failed"
 $lambdaFunctionArn = $lambdaConfiguration.FunctionArn
 if ([string]::IsNullOrWhiteSpace([string]$lambdaFunctionArn)) { throw "Lambda function ARN is unavailable" }
-Assert-RuntimeBinding
+Assert-RuntimeBinding "DISABLED"
 ~~~
+
+업로드는 Terraform이 만든 동일 private bucket의 `PILO_TOPOLOGY_KEY` 한 객체에만 수행하며, `incidents/` lifecycle 대상이 아니다. 명령 출력과 topology 본문은 노출하지 않고 checksum metadata로 로컬 입력과 일치하는지만 확인한다. 첫 apply는 EventBridge rule을 비활성 상태로 먼저 만들거나 변경하며 Lambda는 이 변경 뒤에만 갱신된다.
+
+이제 route 활성화만 담은 두 번째 plan을 생성한다. 보호 승인자와 plan 검토자는 변경 대상이 해당 EventBridge rule의 `state: DISABLED -> ENABLED`뿐인지 확인해야 하며, 다른 변경이 있으면 중단한다.
+
+~~~powershell
+git check-ignore -q infra/saved-dev-enable-route.tfplan
+if ($LASTEXITCODE -ne 0) { throw "Saved route-enable plan path must be ignored" }
+$env:TF_VAR_event_route_enabled = "true"
+Assert-ApprovedAccount
+terraform -chdir=infra plan -out saved-dev-enable-route.tfplan
+if ($LASTEXITCODE -ne 0) { throw "Route-enable Terraform plan failed" }
+~~~
+
+두 번째 plan이 별도로 승인된 뒤에만 적용하고, 활성 runtime binding과 synthetic Alarm의 OK 상태를 다시 확인한다.
+
+~~~powershell
+Assert-ApprovedAccount
+terraform -chdir=infra apply saved-dev-enable-route.tfplan
+if ($LASTEXITCODE -ne 0) { throw "Route-enable Terraform apply failed" }
+Assert-RuntimeBinding "ENABLED"
+$readyAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
+~~~
+
+apply 시작부터 위 활성 binding과 OK gate가 성공할 때까지 synthetic Alarm을 trigger해서는 안 된다. 이 2단계 순서는 CloudWatch의 자동 상태 전이가 무-topology Lambda에 전달되는 구간도 제거한다.
 
 Assert-RuntimeBinding은 Lambda environment, EventBridge event pattern, EventBridge target을 정확한 singleton 값으로 검사한다. 따라서 이 smoke deployment의 rule은 전용 synthetic ARN만 route해야 하며 application alarm을 동시에 route하면 안 된다. 실제 PILO alarm route 활성화는 smoke 성공 뒤 별도 승인된 Terraform plan/apply로 전환하는 후속 단계다. 이 runbook은 application alarm route를 자동 적용하거나 복구하지 않는다.
 
@@ -339,7 +373,7 @@ Assert-RuntimeBinding은 Lambda environment, EventBridge event pattern, EventBri
 $smokeFailed = $false
 try {
   Assert-ApprovedAccount
-  Assert-RuntimeBinding
+  Assert-RuntimeBinding "ENABLED"
   $triggerAlarm = Get-ApprovedSyntheticMetricAlarm -RequireOkState
   $originalState = $triggerAlarm.StateValue
   $smokeStartedAt = [DateTime]::UtcNow

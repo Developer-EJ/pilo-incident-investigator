@@ -1,5 +1,5 @@
 output "bundle_bucket_name" {
-  description = "Private seven-day Incident Bundle bucket."
+  description = "Private bucket for seven-day Incident Bundles and the protected topology object."
   value       = aws_s3_bucket.bundle.id
 }
 
