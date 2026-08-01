@@ -48,18 +48,22 @@ GitHub 게시 token과 Slack Incoming Webhook URL은 서비스 전용 SSM Secure
 - LLM 출력은 `확인된 사실`, `조사 방향`, `누락 정보`를 분리하고 모든 판단에 Evidence ID를 인용한다.
 - Collector 일부 실패는 숨기지 말고 누락 정보와 실패 상태로 보존한다.
 - 실제 리소스 식별자나 민감한 topology는 커밋하지 않는다. 공개 저장소에는 익명화된 topology 예시만 둘 수 있다.
+- Lambda artifact에는 `src/pilo_incident_investigator`와 설치된 런타임 import만 포함한다. topology, `.env`, Terraform state, bytecode, OS별 native extension과 테스트 데이터는 포함하지 않는다.
 
 ## 테스트·검증 명령 계약
 
-현재 저장소에는 Python 3.12 개발 의존성을 설치한 환경에서 실행할 수 있는 다음 명령이 제공된다.
+현재 저장소에는 Python 3.12 개발 의존성과 Terraform `>= 1.10, < 2.0`을 설치한 환경에서 실행할 수 있는 다음 명령이 제공된다.
 
-- `make check`: 현재 Python 소스와 테스트에 Ruff 검사·포맷 확인 및 mypy strict 검사를 실행한다.
+- `make check`: 현재 Python 소스, 테스트, 저장소 스크립트에 Ruff 검사·포맷 확인 및 mypy strict 검사를 실행한다.
 - `make test`: 현재 구현된 단위·통합 테스트를 실행하며 실제 AWS, Slack, GitHub를 변경하지 않는다.
+- `make terraform-check`: Lambda artifact를 만든 뒤 Terraform format, backend 없는 init, validate, native test, IAM·소유권 정책 검사를 실행하며 `plan`이나 `apply`는 수행하지 않는다.
+- `python scripts/build_lambda.py`: 설치된 런타임 import와 애플리케이션 소스로 재현 가능한 `dist/pilo-incident-investigator.zip`을 만든다. 실제 운영 데이터는 포함하지 않는다.
+- `make verify`: 현재 구현된 Python과 Terraform 검증을 한 번에 실행한다. 평가 구현이 완료되면 `make eval`도 포함하는 최종 계약으로 확장한다.
 
-다음 target은 Makefile에 예약돼 있지만, 해당 구현이 끝나기 전에는 성공하는 명령으로 간주하지 않는다.
+다음 target은 Makefile에 예약돼 있지만, 평가 구현이 끝나기 전에는 성공하는 명령으로 간주하지 않는다.
 
 - `make eval`: 익명화된 21개 fixture와 평가 harness 구현이 완료되면 `snapshot_only`와 `hybrid_agent`를 비교한다.
-- `make terraform-check`: `infra/` 구현이 완료되면 Terraform 포맷과 정적 검증을 실행하되 apply는 수행하지 않는다.
-- `make verify`: 런타임·Terraform·eval 구현이 모두 완료되면 위 검증을 한 번에 실행하는 최종 로컬/CI 진입점이 된다.
 
 명령 계약을 변경하려면 사용자 승인과 이 문서의 동시 수정이 필요하다. 외부 연동 테스트는 별도의 명시적 opt-in과 격리된 테스트 대상을 요구하며 기본 검증 경로에 포함하지 않는다.
+
+`.github/workflows/verify.yml`은 read-only CI다. AWS write credential, GitHub 게시 token, Slack Webhook을 주입하거나 실제 배포를 실행해서는 안 된다. 실제 dev 배포는 보호 환경 승인, 저장된 Terraform plan 검토, SSM parameter와 topology object의 metadata-only 사전 확인을 거친 별도 작업에서만 수행한다.

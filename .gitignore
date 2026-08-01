@@ -1,4 +1,10 @@
 .worktrees/
+.coverage
+.env
+.env.*
+!.env.example
+.terraform/
+.terraform.tfstate.lock.info
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
@@ -6,4 +12,12 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.tfplan
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.auto.tfvars
+build/
+crash.log
 dist/
+pilo-topology.yaml
