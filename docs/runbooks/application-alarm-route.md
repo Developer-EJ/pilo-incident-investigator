@@ -146,7 +146,7 @@ if ($LASTEXITCODE -ne 0 -or $deployedLambdaChecksum -cne $localLambdaChecksum) {
   throw 'Lambda artifact differs from the deployed function'
 }
 
-terraform -chdir=infra plan -input=false -var-file=$deployTfvarsFile -out=$savedPlanFile *> $terraformPlanLog
+terraform -chdir=infra plan -input=false -var-file=$($deployTfvarsFile) -out=$savedPlanFile *> $terraformPlanLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan failed' }
 $planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan JSON export failed' }
@@ -192,7 +192,7 @@ foreach ($field in @('Input', 'InputPath', 'InputTransformer')) {
 }
 $concurrency = aws lambda get-function-concurrency --function-name $terraformLambdaFunctionName --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $null -eq $concurrency.ReservedConcurrentExecutions -or [int]$concurrency.ReservedConcurrentExecutions -ne 2) { throw 'Lambda reserved concurrency is invalid' }
-terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$deployTfvarsFile 1>$null 2>$null
+terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$($deployTfvarsFile) 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Post-apply Terraform plan is not empty' }
 ~~~
 
