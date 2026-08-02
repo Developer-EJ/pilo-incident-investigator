@@ -136,15 +136,27 @@ def validate_terraform_plan(
         change = item.get("change")
         if not isinstance(change, dict):
             _fail("plan change entry is invalid")
+        address = item.get("address")
         actions = change.get("actions")
+        before = change.get("before")
+        after = change.get("after")
+        after_unknown = change.get("after_unknown")
         if (
-            not isinstance(actions, list)
+            not isinstance(address, str)
+            or not address.strip()
+            or not isinstance(actions, list)
             or not all(isinstance(action, str) for action in actions)
             or tuple(actions) not in ALLOWED_TERRAFORM_ACTION_SHAPES
+            or not isinstance(before, dict)
+            or not isinstance(after, dict)
+            or not isinstance(after_unknown, dict)
         ):
-            _fail("plan action shape is invalid")
-        if actions != ["no-op"]:
-            changes.append(item)
+            _fail("plan change entry is invalid")
+        if actions == ["no-op"]:
+            if before != after:
+                _fail("plan no-op entry is invalid")
+            continue
+        changes.append(item)
     if len(changes) != 1:
         _fail("plan change count is invalid")
     item = changes[0]
