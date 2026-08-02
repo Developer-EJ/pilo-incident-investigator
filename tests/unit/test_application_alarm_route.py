@@ -14,6 +14,7 @@ import yaml
 from scripts.verify_application_alarm_route import (
     RouteContractError,
     build_candidate_topology,
+    routed_alarm_arns,
     validate_event_pattern,
     validate_terraform_plan,
     validate_topology_transition,
@@ -28,12 +29,17 @@ def synthetic_alarm(number: int) -> str:
     return f"arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-{number:02d}"
 
 
-def baseline_topology_text(count: int = 26) -> str:
+def smoke_alarm() -> str:
+    return "arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:synthetic-smoke"
+
+
+def baseline_topology_text(active_count: int = 26) -> str:
     topology = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
     topology["alarms"] = {
         synthetic_alarm(number): [f"pilo-dev-service-{(number - 1) % 8 + 1:02d}"]
-        for number in range(1, count + 1)
+        for number in range(1, active_count + 1)
     }
+    topology["alarms"][smoke_alarm()] = ["pilo-dev-service-08"]
     return yaml.safe_dump(topology, sort_keys=False)
 
 
@@ -51,7 +57,7 @@ def additions() -> dict[str, list[str]]:
 
 
 def candidate_topology_text() -> str:
-    return build_candidate_topology(baseline_topology_text(), additions())
+    return build_candidate_topology(baseline_topology_text(), additions(), smoke_alarm())
 
 
 def _wrong_distribution(value: dict[str, list[str]]) -> None:
@@ -114,11 +120,16 @@ def terraform_plan(before_pattern: dict[str, Any], after_pattern: dict[str, Any]
 
 def test_candidate_is_exact_baseline_union_eight_additions() -> None:
     baseline = baseline_topology_text()
-    candidate = build_candidate_topology(baseline, additions())
+    candidate = build_candidate_topology(baseline, additions(), smoke_alarm())
 
-    alarm_arns = validate_topology_transition(baseline, candidate, additions())
+    alarm_arns = validate_topology_transition(baseline, candidate, additions(), smoke_alarm())
 
-    assert alarm_arns == frozenset(synthetic_alarm(number) for number in range(1, 35))
+    assert alarm_arns == frozenset(
+        [*(synthetic_alarm(number) for number in range(1, 35)), smoke_alarm()]
+    )
+    assert routed_alarm_arns(candidate, smoke_alarm(), 35) == frozenset(
+        synthetic_alarm(number) for number in range(1, 35)
+    )
 
 
 @pytest.mark.parametrize(
@@ -186,7 +197,7 @@ def test_transition_rejects_any_non_exact_topology_change(
         candidate = yaml.safe_dump(data, sort_keys=False)
 
     with pytest.raises(RouteContractError):
-        validate_topology_transition(baseline, candidate, changed_additions)
+        validate_topology_transition(baseline, candidate, changed_additions, smoke_alarm())
 
 
 def test_event_pattern_accepts_only_exact_candidate_resources() -> None:
@@ -346,6 +357,8 @@ def test_cli_never_echoes_sensitive_invalid_input(tmp_path: Path) -> None:
             str(additions_file),
             "--output",
             str(tmp_path / "candidate.yaml"),
+            "--non-routed-alarm",
+            smoke_alarm(),
         ],
         check=False,
         capture_output=True,

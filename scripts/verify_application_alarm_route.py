@@ -13,9 +13,11 @@ import yaml
 
 from pilo_incident_investigator.topology import Topology, TopologyError
 
-BASELINE_ALARM_COUNT = 26
+BASELINE_ACTIVE_ROUTE_ALARM_COUNT = 26
 ADDED_ALARM_COUNT = 8
-FINAL_ALARM_COUNT = 34
+FINAL_ACTIVE_ROUTE_ALARM_COUNT = 34
+BASELINE_TOPOLOGY_ALARM_COUNT = 27
+FINAL_TOPOLOGY_ALARM_COUNT = 35
 ADDED_SERVICE_COUNT = 4
 ALARMS_PER_ADDED_SERVICE = 2
 ALLOWED_TERRAFORM_ACTION_SHAPES = frozenset(
@@ -67,8 +69,26 @@ def _normalize_additions(value: object) -> dict[str, tuple[str, ...]]:
     return normalized
 
 
+def routed_alarm_arns(
+    topology_text: str, non_routed_alarm_arn: str, expected_topology_alarm_count: int
+) -> frozenset[str]:
+    if not isinstance(non_routed_alarm_arn, str) or not non_routed_alarm_arn.strip():
+        _fail("non-routed alarm is invalid")
+    try:
+        topology = Topology.load(topology_text)
+    except TopologyError as error:
+        raise RouteContractError("topology is invalid") from error
+    mappings = dict(topology.alarm_mappings)
+    if len(mappings) != expected_topology_alarm_count or non_routed_alarm_arn not in mappings:
+        _fail("topology mapping set is invalid")
+    routed = frozenset(mappings) - {non_routed_alarm_arn}
+    if len(routed) != expected_topology_alarm_count - 1:
+        _fail("active route count is invalid")
+    return routed
+
+
 def validate_topology_transition(
-    baseline_text: str, candidate_text: str, additions: object
+    baseline_text: str, candidate_text: str, additions: object, non_routed_alarm_arn: str
 ) -> frozenset[str]:
     try:
         baseline = Topology.load(baseline_text)
@@ -78,20 +98,34 @@ def validate_topology_transition(
     normalized = _normalize_additions(additions)
     baseline_mappings = dict(baseline.alarm_mappings)
     candidate_mappings = dict(candidate.alarm_mappings)
-    if len(baseline_mappings) != BASELINE_ALARM_COUNT:
+    if len(baseline_mappings) != BASELINE_TOPOLOGY_ALARM_COUNT:
         _fail("baseline count is invalid")
+    baseline_routed = routed_alarm_arns(
+        baseline_text, non_routed_alarm_arn, BASELINE_TOPOLOGY_ALARM_COUNT
+    )
+    if len(baseline_routed) != BASELINE_ACTIVE_ROUTE_ALARM_COUNT:
+        _fail("baseline active route count is invalid")
     if set(baseline_mappings) & set(normalized):
         _fail("addition overlaps baseline")
     if baseline.services != candidate.services:
         _fail("service topology changed")
     if candidate_mappings != baseline_mappings | normalized:
         _fail("candidate mapping set is invalid")
-    if len(candidate_mappings) != FINAL_ALARM_COUNT:
+    if len(candidate_mappings) != FINAL_TOPOLOGY_ALARM_COUNT:
         _fail("candidate count is invalid")
+    candidate_routed = routed_alarm_arns(
+        candidate_text, non_routed_alarm_arn, FINAL_TOPOLOGY_ALARM_COUNT
+    )
+    if len(candidate_routed) != FINAL_ACTIVE_ROUTE_ALARM_COUNT:
+        _fail("candidate active route count is invalid")
+    if len(candidate_routed - baseline_routed) != ADDED_ALARM_COUNT:
+        _fail("active route expansion is invalid")
     return frozenset(candidate_mappings)
 
 
-def build_candidate_topology(baseline_text: str, additions: object) -> str:
+def build_candidate_topology(
+    baseline_text: str, additions: object, non_routed_alarm_arn: str
+) -> str:
     normalized = _normalize_additions(additions)
     try:
         raw = yaml.safe_load(baseline_text)
@@ -103,7 +137,7 @@ def build_candidate_topology(baseline_text: str, additions: object) -> str:
     candidate_alarms.update({alarm: list(keys) for alarm, keys in normalized.items()})
     raw["alarms"] = candidate_alarms
     candidate_text = yaml.safe_dump(raw, sort_keys=False)
-    validate_topology_transition(baseline_text, candidate_text, additions)
+    validate_topology_transition(baseline_text, candidate_text, additions, non_routed_alarm_arn)
     return candidate_text
 
 
@@ -192,17 +226,20 @@ def _read_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _candidate_alarms(path: Path) -> frozenset[str]:
-    topology = Topology.load(path.read_text(encoding="utf-8"))
-    return frozenset(alarm for alarm, _ in topology.alarm_mappings)
+def _candidate_routed_alarms(
+    path: Path, non_routed_alarm_arn: str, expected_topology_alarm_count: int
+) -> frozenset[str]:
+    return routed_alarm_arns(
+        path.read_text(encoding="utf-8"), non_routed_alarm_arn, expected_topology_alarm_count
+    )
 
 
 def run_command(args: argparse.Namespace) -> int:
     if args.command == "build-candidate":
         baseline = args.baseline.read_text(encoding="utf-8")
         additions = _read_json(args.additions)
-        candidate = build_candidate_topology(baseline, additions)
-        alarms = validate_topology_transition(baseline, candidate, additions)
+        candidate = build_candidate_topology(baseline, additions, args.non_routed_alarm)
+        alarms = validate_topology_transition(baseline, candidate, additions, args.non_routed_alarm)
         args.output.write_text(candidate, encoding="utf-8")
         print(len(alarms))
         return 0
@@ -211,17 +248,24 @@ def run_command(args: argparse.Namespace) -> int:
             args.baseline.read_text(encoding="utf-8"),
             args.candidate.read_text(encoding="utf-8"),
             _read_json(args.additions),
+            args.non_routed_alarm,
         )
         print(len(alarms))
         return 0
     if args.command == "validate-event-pattern":
-        alarms = _candidate_alarms(args.candidate)
+        alarms = _candidate_routed_alarms(
+            args.candidate, args.non_routed_alarm, FINAL_TOPOLOGY_ALARM_COUNT
+        )
         validate_event_pattern(_read_json(args.pattern), alarms)
         print(len(alarms))
         return 0
     if args.command == "validate-plan":
-        baseline_alarms = _candidate_alarms(args.baseline)
-        candidate_alarms = _candidate_alarms(args.candidate)
+        baseline_alarms = _candidate_routed_alarms(
+            args.baseline, args.non_routed_alarm, BASELINE_TOPOLOGY_ALARM_COUNT
+        )
+        candidate_alarms = _candidate_routed_alarms(
+            args.candidate, args.non_routed_alarm, FINAL_TOPOLOGY_ALARM_COUNT
+        )
         validate_terraform_plan(_read_json(args.plan), baseline_alarms, candidate_alarms)
         print(len(candidate_alarms))
         return 0
@@ -235,17 +279,21 @@ def _parser() -> _ContractArgumentParser:
     build.add_argument("--baseline", type=Path, required=True)
     build.add_argument("--additions", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
+    build.add_argument("--non-routed-alarm", required=True)
     transition = commands.add_parser("validate-transition")
     transition.add_argument("--baseline", type=Path, required=True)
     transition.add_argument("--candidate", type=Path, required=True)
     transition.add_argument("--additions", type=Path, required=True)
+    transition.add_argument("--non-routed-alarm", required=True)
     pattern = commands.add_parser("validate-event-pattern")
     pattern.add_argument("--candidate", type=Path, required=True)
     pattern.add_argument("--pattern", type=Path, required=True)
+    pattern.add_argument("--non-routed-alarm", required=True)
     plan = commands.add_parser("validate-plan")
     plan.add_argument("--baseline", type=Path, required=True)
     plan.add_argument("--candidate", type=Path, required=True)
     plan.add_argument("--plan", type=Path, required=True)
+    plan.add_argument("--non-routed-alarm", required=True)
     return parser
 
 

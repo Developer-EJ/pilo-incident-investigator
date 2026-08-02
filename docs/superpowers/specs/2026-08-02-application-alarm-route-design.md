@@ -4,7 +4,7 @@
 
 PILO dev에는 ECS 실행 상태, ALB healthy target, SQS DLQ backlog를 관찰하는 애플리케이션 Alarm 8개가 새로 추가되어 있다. 이 Alarm들은 현재 알림 동작을 직접 실행하지 않으며, Incident Investigator의 EventBridge 허용 목록에도 아직 포함되지 않는다.
 
-이번 변경의 목표는 기존 26개 Alarm 경로를 그대로 유지하면서 신규 8개 Alarm을 추가하여, Incident Investigator가 정확히 34개의 명시적 Alarm만 수신하도록 연결하는 것이다. 연결 이후에도 조사 모드는 `snapshot_only`, Lambda 예약 동시성은 2로 유지한다.
+이번 변경의 목표는 기존 26개 활성 Alarm 경로를 그대로 유지하면서 신규 8개 Alarm을 추가하여, Incident Investigator가 정확히 34개의 명시적 Alarm만 수신하도록 연결하는 것이다. 보호 topology에는 이와 별도로 전용 synthetic smoke Alarm mapping 1개가 유지되며 EventBridge rule에는 포함하지 않는다. 연결 이후에도 조사 모드는 `snapshot_only`, Lambda 예약 동시성은 2로 유지한다.
 
 이 변경은 Alarm을 새로 만들거나 상태를 바꾸는 작업이 아니다. 이미 존재하는 Alarm이 자연스럽게 `ALARM` 상태로 전환될 때 Incident Investigator의 기존 세로 흐름으로 전달되도록 허용 목록을 확장하는 작업이다.
 
@@ -36,7 +36,7 @@ PILO dev에는 ECS 실행 상태, ALB healthy target, SQS DLQ backlog를 관찰�
 
 1. EventBridge는 신규 8개를 포함한 정확한 34개 Alarm ARN만 허용한다. 이름 접두사, 태그 또는 와일드카드로 범위를 넓히지 않는다.
 2. 신규 Alarm 경로를 열기 전에 보호 topology를 먼저 갱신하고 검증한다. topology에 없는 Alarm 이벤트가 먼저 Lambda에 도착하는 순서를 허용하지 않는다.
-3. 기존 26개 Alarm과 그 topology 관계는 제거하거나 변경하지 않는다.
+3. 기존 26개 활성 Alarm과 그 topology 관계는 제거하거나 변경하지 않는다. topology 전용 synthetic smoke mapping도 보존하되 EventBridge 활성 경로에 추가하지 않는다.
 4. 보호 topology는 로컬 보호 임시 파일에서만 다룬다. 본문을 표준 출력, 애플리케이션 로그, Git, Issue 또는 PR에 기록하지 않는다.
 5. Terraform은 저장된 전체 plan을 사용한다. plan에 EventBridge rule의 리소스 집합 확장 외 변경이 나타나면 적용하지 않고 중단한다.
 6. 실제 애플리케이션 Alarm에 `SetAlarmState`를 호출하지 않는다. 기존 합성 smoke 경로가 세로 흐름을 검증하고, 신규 경로는 구성과 자연 발생 이벤트를 수동적으로 검증한다.
@@ -63,7 +63,7 @@ PILO dev에는 ECS 실행 상태, ALB healthy target, SQS DLQ backlog를 관찰�
 업로드 전 검증 조건은 다음과 같다.
 
 - PILO ECS 서비스가 정확히 8개다.
-- 기존 26개 Alarm 관계가 모두 보존된다.
+- 기존 26개 활성 Alarm 관계와 topology 전용 synthetic smoke mapping이 모두 보존된다.
 - 신규 8개 Alarm이 지정된 네 서비스에 정확히 한 번씩 연결된다.
 - topology 허용 목록 밖 리소스가 추가되지 않는다.
 - 중복 Alarm ARN과 와일드카드가 없다.
@@ -74,7 +74,8 @@ PILO dev에는 ECS 실행 상태, ALB healthy target, SQS DLQ backlog를 관찰�
 
 배포 입력은 다음 불변 조건을 가진다.
 
-- Alarm ARN 집합: 기존 26개와 신규 8개를 합친 정확한 34개
+- EventBridge Alarm ARN 집합: 기존 26개와 신규 8개를 합친 정확한 34개
+- topology Alarm mapping 집합: EventBridge 34개와 synthetic smoke 1개를 합친 정확한 35개
 - EventBridge route: 활성화
 - 조사 모드: `snapshot_only`
 - Lambda 예약 동시성: 2
