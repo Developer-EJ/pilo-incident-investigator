@@ -414,7 +414,7 @@ Lambda artifact를 재현 빌드하고 로컬 zip SHA-256과 현재 Lambda `Code
 ```powershell
 python scripts/build_lambda.py *> $null
 if ($LASTEXITCODE -ne 0) { throw "Lambda artifact build failed" }
-terraform -chdir=infra plan -input=false -var-file=$deployTfvarsFile -out=$savedPlanFile *> $terraformPlanLog
+terraform -chdir=infra plan -input=false -var-file=$($deployTfvarsFile) -out=$savedPlanFile *> $terraformPlanLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
 $planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan JSON export failed" }

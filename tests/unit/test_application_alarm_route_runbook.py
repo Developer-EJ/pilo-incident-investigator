@@ -93,6 +93,13 @@ def test_runbook_captures_terraform_output_outside_the_console() -> None:
     assert "terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog" in text
 
 
+def test_runbook_expands_tfvars_path_for_powershell_native_commands() -> None:
+    text = read_runbook()
+
+    assert "-var-file=$($deployTfvarsFile)" in text
+    assert "-var-file=$deployTfvarsFile" not in text
+
+
 def test_runbook_rejects_protected_paths_inside_repository() -> None:
     text = read_runbook()
 
