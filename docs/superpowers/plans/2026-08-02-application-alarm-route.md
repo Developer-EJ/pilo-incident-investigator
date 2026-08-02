@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, PyYAML, pytest, Ruff, mypy strict, PowerShell, AWS CLI, Terraform `>= 1.10, < 2.0`, GitHub CLI.
 
+> **2026-08-02 정정:** 실제 보호 topology에는 EventBridge에 연결하지 않는 전용 synthetic smoke Alarm mapping 1개가 있다. 따라서 topology mapping 수는 적용 전 27개, 적용 후 35개이며, EventBridge 활성 resource 수만 26개에서 34개로 늘어난다. 이후의 `26→34` 표현은 EventBridge 활성 경로를 뜻한다. verifier와 runbook은 보호 입력 `PILO_SMOKE_ALARM_ARN`을 받아 이 mapping을 topology에서는 보존하고 event pattern·Terraform plan 비교에서는 제외한다.
+
 ## Global Constraints
 
 - 대상은 PILO AWS dev, `ap-northeast-2`, PILO ECS 8개 서비스다.
@@ -41,8 +43,9 @@ tests/unit/test_application_alarm_route_runbook.py
 
 **Interfaces:**
 - Produces: `RouteContractError(ValueError)`; 실제 식별자를 예외 메시지에 넣지 않는다.
-- Produces: `build_candidate_topology(baseline_text: str, additions: object) -> str`.
-- Produces: `validate_topology_transition(baseline_text: str, candidate_text: str, additions: object) -> frozenset[str]`.
+- Produces: `build_candidate_topology(baseline_text: str, additions: object, non_routed_alarm_arn: str) -> str`.
+- Produces: `validate_topology_transition(baseline_text: str, candidate_text: str, additions: object, non_routed_alarm_arn: str) -> frozenset[str]`.
+- Produces: `routed_alarm_arns(topology_text: str, non_routed_alarm_arn: str, expected_topology_alarm_count: int) -> frozenset[str]`.
 - Produces: `validate_event_pattern(pattern: object, expected_alarm_arns: frozenset[str]) -> None`.
 - Produces: `validate_terraform_plan(plan: object, baseline_alarm_arns: frozenset[str], candidate_alarm_arns: frozenset[str]) -> None`.
 - Produces CLI commands `build-candidate`, `validate-transition`, `validate-event-pattern`, `validate-plan`; 성공 시 개수만 출력하고 실패 시 `application Alarm route validation failed`만 stderr에 출력한다.
@@ -83,7 +86,7 @@ def test_candidate_is_exact_baseline_union_eight_additions() -> None:
 
 같은 파일에 다음 변형이 각각 `RouteContractError`를 발생시키는 테스트를 작성한다.
 
-- baseline이 26개가 아님
+- baseline topology가 27개가 아님(활성 26개와 synthetic smoke 1개)
 - 추가 mapping이 8개가 아님
 - 4개 서비스에 각 2개씩 연결되지 않음
 - 신규 Alarm이 두 서비스에 연결됨
@@ -104,9 +107,11 @@ Expected: FAIL with import error for `scripts.verify_application_alarm_route`.
 `Topology.load`로 baseline과 candidate의 스키마를 모두 검증한다. count 상수와 addition shape를 먼저 검사하고, candidate mapping이 baseline과 additions의 정확한 합집합인지 비교한다.
 
 ```python
-BASELINE_ALARM_COUNT = 26
+BASELINE_ACTIVE_ROUTE_ALARM_COUNT = 26
 ADDED_ALARM_COUNT = 8
-FINAL_ALARM_COUNT = 34
+FINAL_ACTIVE_ROUTE_ALARM_COUNT = 34
+BASELINE_TOPOLOGY_ALARM_COUNT = 27
+FINAL_TOPOLOGY_ALARM_COUNT = 35
 ADDED_SERVICE_COUNT = 4
 ALARMS_PER_ADDED_SERVICE = 2
 ALLOWED_TERRAFORM_ACTION_SHAPES = frozenset(
@@ -159,7 +164,7 @@ def validate_topology_transition(
     normalized = _normalize_additions(additions)
     baseline_mappings = dict(baseline.alarm_mappings)
     candidate_mappings = dict(candidate.alarm_mappings)
-    if len(baseline_mappings) != BASELINE_ALARM_COUNT:
+    if len(baseline_mappings) != BASELINE_TOPOLOGY_ALARM_COUNT:
         raise RouteContractError("baseline count is invalid")
     if set(baseline_mappings) & set(normalized):
         raise RouteContractError("addition overlaps baseline")
@@ -167,7 +172,7 @@ def validate_topology_transition(
         raise RouteContractError("service topology changed")
     if candidate_mappings != baseline_mappings | normalized:
         raise RouteContractError("candidate mapping set is invalid")
-    if len(candidate_mappings) != FINAL_ALARM_COUNT:
+    if len(candidate_mappings) != FINAL_TOPOLOGY_ALARM_COUNT:
         raise RouteContractError("candidate count is invalid")
     return frozenset(candidate_mappings)
 ```
@@ -313,7 +318,7 @@ git commit -m "feat: validate application Alarm route changes (#28)"
 - Create: `tests/unit/test_application_alarm_route_runbook.py`
 
 **Interfaces:**
-- Consumes protected environment variables: `PILO_DEV_ACCOUNT_ID`, `PILO_BASELINE_TOPOLOGY_FILE`, `PILO_CANDIDATE_TOPOLOGY_FILE`, `PILO_NEW_ALARM_MAPPINGS_FILE`, `PILO_TOPOLOGY_BUCKET`, `PILO_TOPOLOGY_KEY`, `PILO_EVENT_RULE_NAME`, `PILO_LAMBDA_FUNCTION_NAME`, `PILO_DEPLOY_TFVARS_FILE`.
+- Consumes protected environment variables: `PILO_DEV_ACCOUNT_ID`, `PILO_BASELINE_TOPOLOGY_FILE`, `PILO_CANDIDATE_TOPOLOGY_FILE`, `PILO_NEW_ALARM_MAPPINGS_FILE`, `PILO_TOPOLOGY_BUCKET`, `PILO_TOPOLOGY_KEY`, `PILO_EVENT_RULE_NAME`, `PILO_LAMBDA_FUNCTION_NAME`, `PILO_DEPLOY_TFVARS_FILE`, `PILO_SMOKE_ALARM_ARN`.
 - Produces only 저장소 밖 보호 임시 artifact: candidate topology, `application-route.tfplan`, `application-route-plan.json`, `application-route-event-pattern.json`, and Terraform output logs.
 - Never produces repository-tracked actual identifiers or topology data.
 
@@ -392,9 +397,9 @@ if ($LASTEXITCODE -ne 0 -or $configuration.Environment.Variables.PILO_TOPOLOGY_B
 ```powershell
 aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology download failed" }
-python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile *> $null
+python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology candidate build failed" }
-python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile *> $null
+python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology transition failed" }
 aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $candidateTopologyFile --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology upload failed" }
@@ -414,7 +419,7 @@ if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
 $planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan JSON export failed" }
 [IO.File]::WriteAllText($planJsonFile, $planJson, [Text.UTF8Encoding]::new($false))
-python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile *> $null
+python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan scope validation failed" }
 terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform apply failed" }
@@ -502,7 +507,7 @@ Expected: origin/dev contains the merged PR; AWS account equals the protected ap
 
 Run the runbook preflight and `s3api get-object` block.
 
-Expected: baseline validates as exactly 8 services and 26 Alarm mappings. The file remains outside the repository and is retained until post-apply verification completes, so a reviewed rollback candidate can be built if needed.
+Expected: baseline validates as exactly 8 services and 27 topology Alarm mappings (26 active routes plus one synthetic smoke mapping). The file remains outside the repository and is retained until post-apply verification completes, so a reviewed rollback candidate can be built if needed.
 
 - [ ] **Step 3: candidate 생성·전환 검증**
 

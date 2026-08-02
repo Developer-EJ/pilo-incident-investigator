@@ -1,7 +1,8 @@
 # PILO dev application Alarm route 적용 runbook
 
-이 runbook은 PILO dev(`ap-northeast-2`)의 기존 26개 Alarm 경로에 승인된 8개 mapping만
-추가해 정확히 34개 Alarm을 EventBridge rule로 라우팅한다. 적용 전 topology를 먼저
+이 runbook은 PILO dev(`ap-northeast-2`)의 기존 26개 활성 Alarm 경로에 승인된 8개 mapping만
+추가해 정확히 34개 Alarm을 EventBridge rule로 라우팅한다. 전용 synthetic smoke Alarm mapping 1개는
+topology에만 유지하며 EventBridge rule에는 포함하지 않는다. 적용 전 topology를 먼저
 갱신하고, 검증한 단일 saved plan만 적용한다. 실제 Alarm의 상태나 정의를 변경하지 않으며,
 실제 값·식별자·topology 본문은 화면이나 Git에 출력하지 않는다.
 
@@ -15,7 +16,8 @@ $ErrorActionPreference = 'Stop'
 foreach ($name in @(
   'PILO_DEV_ACCOUNT_ID', 'PILO_BASELINE_TOPOLOGY_FILE', 'PILO_CANDIDATE_TOPOLOGY_FILE',
   'PILO_NEW_ALARM_MAPPINGS_FILE', 'PILO_TOPOLOGY_BUCKET', 'PILO_TOPOLOGY_KEY',
-  'PILO_EVENT_RULE_NAME', 'PILO_LAMBDA_FUNCTION_NAME', 'PILO_DEPLOY_TFVARS_FILE'
+  'PILO_EVENT_RULE_NAME', 'PILO_LAMBDA_FUNCTION_NAME', 'PILO_DEPLOY_TFVARS_FILE',
+  'PILO_SMOKE_ALARM_ARN'
 )) {
   if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
     throw 'A required protected input is missing'
@@ -90,8 +92,9 @@ if (
 
 ## 1. topology를 먼저 갱신하고 checksum 확인
 
-보호된 additions JSON은 정확히 8개 mapping이어야 한다. baseline은 정확히 26개이고,
-candidate는 baseline과 additions의 합집합인 정확히 34개여야 한다. validator가 이를
+보호된 additions JSON은 정확히 8개 mapping이어야 한다. baseline topology는 synthetic smoke mapping을
+포함해 정확히 27개이고, candidate topology는 정확히 35개여야 한다. 이 중 EventBridge 활성 경로는
+각각 26개와 34개이며, `$env:PILO_SMOKE_ALARM_ARN`은 두 경로 집합에 포함되면 안 된다. validator가 이를
 확인하므로 count나 mapping을 수동으로 수정하지 않는다. 아래 생성물은 모두 저장소 밖 보호
 임시 artifact여야 하며, 실제 topology나 identifier를 저장소에 추가하지 않는다. 위 사전 점검에서
 Terraform Lambda 이름이나 배포 Lambda의 topology bucket/key가 보호 입력과 다르면 upload와 plan을
@@ -101,9 +104,9 @@ Terraform Lambda 이름이나 배포 Lambda의 topology bucket/key가 보호 입
 aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology download failed' }
 if (-not (Test-Path -LiteralPath $baselineTopologyFile -PathType Leaf)) { throw 'Protected topology download output is missing' }
-python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile *> $null
+python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology candidate build failed' }
-python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile *> $null
+python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology transition failed' }
 aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $candidateTopologyFile --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology upload failed' }
@@ -148,7 +151,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Terraform plan failed' }
 $planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan JSON export failed' }
 [IO.File]::WriteAllText($planJsonFile, $planJson, [Text.UTF8Encoding]::new($false))
-python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile *> $null
+python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan scope validation failed' }
 terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform apply failed' }
@@ -164,7 +167,7 @@ $rule = aws events describe-rule --name $env:PILO_EVENT_RULE_NAME --region ap-no
 if ($LASTEXITCODE -ne 0 -or $rule.State -cne 'ENABLED' -or [string]::IsNullOrWhiteSpace($rule.EventPattern)) { throw 'EventBridge rule inspection failed' }
 $eventPattern = $rule.EventPattern
 [IO.File]::WriteAllText($eventPatternFile, $eventPattern, [Text.UTF8Encoding]::new($false))
-python scripts/verify_application_alarm_route.py validate-event-pattern --candidate $candidateTopologyFile --pattern $eventPatternFile *> $null
+python scripts/verify_application_alarm_route.py validate-event-pattern --candidate $candidateTopologyFile --pattern $eventPatternFile --non-routed-alarm $env:PILO_SMOKE_ALARM_ARN *> $null
 if ($LASTEXITCODE -ne 0) { throw 'EventBridge event pattern validation failed' }
 
 $terraformLambdaFunctionName = (& terraform -chdir=infra output -raw lambda_function_name 2>$null | Out-String).Trim()
