@@ -226,6 +226,27 @@ def test_plan_allows_only_event_rule_resource_expansion() -> None:
 
 
 @pytest.mark.parametrize(
+    "malformed_entry",
+    [
+        None,
+        {"address": "synthetic.missing_change"},
+        {"address": "synthetic.string_actions", "change": {"actions": "no-op"}},
+        {"address": "synthetic.non_string_action", "change": {"actions": [1]}},
+        {"address": "synthetic.unknown_action", "change": {"actions": ["unknown"]}},
+    ],
+    ids=["entry", "change", "actions-list", "actions-string", "action-shape"],
+)
+def test_plan_rejects_malformed_entry_even_with_valid_update(malformed_entry: object) -> None:
+    baseline = frozenset(synthetic_alarm(number) for number in range(1, 27))
+    candidate = frozenset(synthetic_alarm(number) for number in range(1, 35))
+    plan = terraform_plan(event_pattern(baseline), event_pattern(candidate))
+    plan["resource_changes"].insert(0, malformed_entry)
+
+    with pytest.raises(RouteContractError):
+        validate_terraform_plan(plan, baseline, candidate)
+
+
+@pytest.mark.parametrize(
     "mutate",
     [
         lambda value: value["resource_changes"][0].update(

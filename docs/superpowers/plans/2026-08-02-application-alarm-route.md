@@ -109,6 +109,19 @@ ADDED_ALARM_COUNT = 8
 FINAL_ALARM_COUNT = 34
 ADDED_SERVICE_COUNT = 4
 ALARMS_PER_ADDED_SERVICE = 2
+ALLOWED_TERRAFORM_ACTION_SHAPES = frozenset(
+    {
+        ("no-op",),
+        ("create",),
+        ("read",),
+        ("update",),
+        ("delete",),
+        ("delete", "create"),
+        ("create", "delete"),
+        ("forget",),
+        ("create", "forget"),
+    }
+)
 
 
 class RouteContractError(ValueError):
@@ -198,6 +211,12 @@ def validate_event_pattern(
 
 Terraform `show -json`의 `resource_changes`에는 no-op이 포함될 수 있으므로 actions가 `['no-op']`인 항목은 제외한다. 실질 변경은 `aws_cloudwatch_event_rule.alarm` 하나, actions는 정확히 `['update']`여야 한다. before/after에서 `event_pattern`만 다르고 나머지 속성은 같아야 한다.
 
+단, filtering 전에 모든 `resource_changes` entry가 dict이고 `change`가 dict이며 `actions`가
+`list[str]`인지 전수 검사한다. Terraform JSON의 허용 action shape(`no-op`, `create`, `read`,
+`update`, `delete`, replace, `forget`)인지도 확인한다. malformed entry를 정상 update와 함께 넣어도
+반드시 실패해야 하며, 전수 검증 후 정확한 `['no-op']`만 제외한다. 다른 유효 action은 실질 변경으로
+남겨 이후 이 route의 단일 `['update']` 계약에서 거부한다.
+
 ```python
 def test_plan_allows_only_event_rule_resource_expansion() -> None:
     baseline = frozenset(synthetic_alarm(i) for i in range(1, 27))
@@ -220,11 +239,22 @@ def validate_terraform_plan(
 ) -> None:
     if not isinstance(plan, dict) or plan.get("complete") is not True:
         raise RouteContractError("plan is incomplete")
-    changes = [
-        item
-        for item in plan.get("resource_changes", [])
-        if item.get("change", {}).get("actions") != ["no-op"]
-    ]
+    raw_changes = plan.get("resource_changes")
+    if not isinstance(raw_changes, list):
+        raise RouteContractError("plan change count is invalid")
+    changes = []
+    for item in raw_changes:
+        if not isinstance(item, dict) or not isinstance(item.get("change"), dict):
+            raise RouteContractError("plan change entry is invalid")
+        actions = item["change"].get("actions")
+        if (
+            not isinstance(actions, list)
+            or not all(isinstance(action, str) for action in actions)
+            or tuple(actions) not in ALLOWED_TERRAFORM_ACTION_SHAPES
+        ):
+            raise RouteContractError("plan action shape is invalid")
+        if actions != ["no-op"]:
+            changes.append(item)
     if len(changes) != 1:
         raise RouteContractError("plan change count is invalid")
     item = changes[0]
@@ -284,7 +314,7 @@ git commit -m "feat: validate application Alarm route changes (#28)"
 
 **Interfaces:**
 - Consumes protected environment variables: `PILO_DEV_ACCOUNT_ID`, `PILO_BASELINE_TOPOLOGY_FILE`, `PILO_CANDIDATE_TOPOLOGY_FILE`, `PILO_NEW_ALARM_MAPPINGS_FILE`, `PILO_TOPOLOGY_BUCKET`, `PILO_TOPOLOGY_KEY`, `PILO_EVENT_RULE_NAME`, `PILO_LAMBDA_FUNCTION_NAME`, `PILO_DEPLOY_TFVARS_FILE`.
-- Produces only protected temporary files outside the repository: candidate topology, `application-route.tfplan`, `application-route-plan.json`, `application-route-event-pattern.json`, and Terraform output logs.
+- Produces only 저장소 밖 보호 임시 artifact: candidate topology, `application-route.tfplan`, `application-route-plan.json`, `application-route-event-pattern.json`, and Terraform output logs.
 - Never produces repository-tracked actual identifiers or topology data.
 
 - [ ] **Step 1: runbook 안전 계약의 실패 테스트 작성**
@@ -320,7 +350,18 @@ Expected: FAIL because the runbook does not exist.
 
 - [ ] **Step 3: 보호 입력, 저장소 밖 경로, 계정 사전 점검 절차 작성**
 
-runbook은 `Set-StrictMode -Version Latest`와 `$ErrorActionPreference = 'Stop'`으로 시작한다. 모든 보호 변수가 비어 있지 않은지 확인하고, `Resolve-Path`와 `[IO.Path]::GetFullPath`로 baseline, candidate, additions, tfvars와 모든 temporary output parent가 저장소 밖인지 fail-closed로 확인한다. 기존 입력은 존재해야 하며 생성할 output은 저장소 밖의 기존 parent를 가져야 한다. 이후 `aws sts get-caller-identity`의 Account가 `PILO_DEV_ACCOUNT_ID`, region이 `ap-northeast-2`인지 비교한다. 실제 값을 출력하지 않는다.
+runbook은 `Set-StrictMode -Version Latest`와 `$ErrorActionPreference = 'Stop'`으로 시작한다. 모든 보호 변수가 비어 있지 않은지 확인하고, Windows PowerShell 5.1에 존재하는 `[IO.Path]::IsPathRooted`, `[IO.Path]::GetPathRoot`, `[IO.Path]::GetFullPath`와 `Resolve-Path`로 baseline, candidate, additions, tfvars와 모든 임시 output parent가 저장소 밖인지 fail-closed로 확인한다. drive-relative(`C:foo`)와 current-drive-rooted(`\foo`) 경로도 거부한다. 기존 입력은 존재해야 하며 생성할 output은 저장소 밖의 기존 parent를 가져야 한다. 이후 `aws sts get-caller-identity`의 Account가 `PILO_DEV_ACCOUNT_ID`, region이 `ap-northeast-2`인지 비교한다. 실제 값을 출력하지 않는다.
+
+```powershell
+if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+  throw "Protected path must be absolute"
+}
+$pathRoot = [IO.Path]::GetPathRoot($Path)
+if ([string]::IsNullOrWhiteSpace($pathRoot) -or $pathRoot -match '^[A-Za-z]:$' -or $pathRoot -in @('\', '/')) {
+  throw "Protected path must be absolute"
+}
+$absolutePath = [IO.Path]::GetFullPath($Path)
+```
 
 ```powershell
 $account = aws sts get-caller-identity --query Account --output text --region ap-northeast-2 2>$null
@@ -335,7 +376,18 @@ if ($LASTEXITCODE -ne 0 -or $region -cne "ap-northeast-2") {
 
 - [ ] **Step 4: topology 선행 갱신과 checksum 절차 작성**
 
-현재 object를 `PILO_BASELINE_TOPOLOGY_FILE`로 내려받고, 보호된 8개 mapping JSON으로 candidate를 만든 뒤 전환을 검증한다. 명령 출력은 버린다.
+S3를 변경하기 전에 Terraform의 실제 `lambda_function_name` output이 `PILO_LAMBDA_FUNCTION_NAME`과 exact 일치하고, 해당 배포 Lambda configuration의 `PILO_TOPOLOGY_BUCKET`/`PILO_TOPOLOGY_KEY`가 보호 입력과 exact 일치하는지 확인한다. 불일치하면 upload와 plan 전에 즉시 중단한다. 그 뒤 현재 object를 `PILO_BASELINE_TOPOLOGY_FILE`로 내려받고, 보호된 8개 mapping JSON으로 candidate를 만든 뒤 전환을 검증한다. 명령 출력은 버린다.
+
+```powershell
+$terraformLambdaFunctionName = (& terraform -chdir=infra output -raw lambda_function_name 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $terraformLambdaFunctionName -cne $env:PILO_LAMBDA_FUNCTION_NAME) {
+  throw "Lambda deployment binding is invalid"
+}
+$configuration = aws lambda get-function-configuration --function-name $terraformLambdaFunctionName --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $configuration.Environment.Variables.PILO_TOPOLOGY_BUCKET -cne $env:PILO_TOPOLOGY_BUCKET -or $configuration.Environment.Variables.PILO_TOPOLOGY_KEY -cne $env:PILO_TOPOLOGY_KEY) {
+  throw "Lambda deployment binding is invalid"
+}
+```
 
 ```powershell
 aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
@@ -368,13 +420,13 @@ terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform apply failed" }
 ```
 
-plan과 JSON은 `.gitignore`의 `*.tfplan` 및 별도 임시 경로를 사용하고, 적용에는 검증한 동일 saved plan만 사용한다. 실제 출력에서 EventBridge rule 외 변경이 보이면 검증기 결과와 무관하게 멈춘다.
+plan, JSON, tfplan, log는 저장소 밖 보호 임시 artifact로 만들고, 적용에는 검증한 동일 saved plan만 사용한다. 실제 출력에서 EventBridge rule 외 변경이 보이면 검증기 결과와 무관하게 멈춘다.
 
 - [ ] **Step 6: read-only 사후 검증과 수동 rollback 경계 작성**
 
-`aws events describe-rule`의 `EventPattern`을 JSON 파일로 저장하고 candidate topology의 34개와 exact 비교한다. `aws events list-targets-by-rule`은 target 하나, Terraform output의 Lambda ARN과 동일, Input/InputPath/InputTransformer 없음이어야 한다. Lambda configuration의 `PILO_MODE`는 `snapshot_only`, reserved concurrency는 2여야 한다. 후속 `terraform plan -detailed-exitcode`는 0이어야 한다.
+`aws events describe-rule`의 `State`가 정확히 `ENABLED`인지 확인하고 `EventPattern`을 JSON 파일로 저장해 candidate topology의 34개와 exact 비교한다. 존재하는 Terraform `lambda_function_name` output을 보호 입력과 exact 비교한 뒤 `aws lambda get-function-configuration`의 `FunctionArn`을 얻는다. `aws events list-targets-by-rule`은 target 하나, 이 AWS `FunctionArn`과 exact 일치, Input/InputPath/InputTransformer 없음이어야 한다. Lambda configuration의 `PILO_MODE`는 `snapshot_only`이고 topology bucket/key도 보호 입력과 일치해야 하며, reserved concurrency는 `aws lambda get-function-concurrency`에서 정확히 2인지 확인한다. 후속 `terraform plan -detailed-exitcode`는 0이어야 한다.
 
-자연 발생 이벤트가 없으면 구성 실패로 판단하지 않으며 실제 Alarm 상태를 바꾸지 않는다. 검증 실패 시 자동 rollback하지 않고 기존 26개를 복원하는 별도 saved plan을 만든 후 사용자 승인을 받는다고 명시한다.
+자연 발생 이벤트가 없으면 구성 실패로 판단하지 않으며 실제 Alarm 상태를 바꾸지 않는다. 모든 검증 성공 뒤 candidate, plan JSON, tfplan, event pattern, Terraform log를 삭제한다. baseline은 사용자 결정에 따라 보호 위치에 보존하거나 삭제하고, 명시적 삭제 결정이 없으면 보존한다. 검증 실패 시 자동 rollback하지 않고 기존 26개를 복원하는 별도 saved plan을 만든 후 사용자 승인을 받는다고 명시한다.
 
 - [ ] **Step 7: runbook 계약과 전체 단위 테스트 실행 후 커밋**
 
@@ -434,7 +486,7 @@ Expected: PR is merged into `dev`; `main` remains unchanged.
 ### Task 4: 보호 topology 전환
 
 **Files:**
-- Protected temporary files only; never add them to Git.
+- 저장소 밖 보호 임시 artifact only; never add them to Git.
 
 **Interfaces:**
 - Consumes the currently deployed topology object and protected eight-Alarm mapping JSON.
@@ -467,7 +519,7 @@ Expected: same protected bucket/key, `AES256`, positive content length, remote `
 ### Task 5: EventBridge 26→34 saved plan 적용
 
 **Files:**
-- Ignored `dist/` artifact and protected temporary plan files only.
+- `dist/` build artifact and 저장소 밖 보호 임시 plan artifact only.
 
 **Interfaces:**
 - Consumes the merged `dev`, protected deployment tfvars, baseline/candidate topology and current Terraform backend state.
@@ -510,11 +562,11 @@ Expected: `0 added, 1 changed, 0 destroyed`, with the one change limited to the 
 
 Run the runbook `describe-rule`, `validate-event-pattern`, and `list-targets-by-rule` checks.
 
-Expected: enabled rule, exact 34 resources, `ALARM` only, existing Lambda target one, no input transformation.
+Expected: `State=ENABLED`, exact 34 resources, `ALARM` only, AWS Lambda `FunctionArn`과 exact 일치하는 target 하나, no input transformation.
 
 - [ ] **Step 2: Lambda 불변 조건과 topology metadata 검증**
 
-Run the runbook Lambda configuration/concurrency and S3 `head-object --checksum-mode ENABLED` checks.
+Run the runbook Lambda `get-function-configuration`, `get-function-concurrency` and S3 `head-object --checksum-mode ENABLED` checks.
 
 Expected: `PILO_MODE=snapshot_only`, reserved concurrency 2, topology AES256 and local candidate와 일치하는 SHA-256 checksum.
 
@@ -528,4 +580,4 @@ Expected: exit code 0 and no changes. Exit code 2 means drift and must be report
 
 실제 Alarm은 조작하지 않는다. 자연 발생 `ALARM` 이벤트가 있으면 Incident ID로 private S3 Bundle, private GitHub Issue, Slack 요약을 확인하되 내용을 공개 위치에 복사하지 않는다. 자연 이벤트가 없으면 구성 검증 완료로 종료한다.
 
-post-apply 검증이 모두 통과한 뒤에만 protected candidate, mapping JSON, plan JSON과 tfplan을 삭제한다. baseline topology 복구본은 사용자 승인에 따라 보호 위치에서 보존하거나 안전하게 삭제한다. Git working tree가 깨끗하고 `main`이 변경되지 않았는지 확인한다.
+post-apply 검증이 모두 통과한 뒤에만 저장소 밖 보호 임시 candidate, plan JSON, tfplan, event pattern, Terraform log를 삭제한다. baseline topology 복구본은 사용자 결정에 따라 보호 위치에서 보존하거나 안전하게 삭제하며, 명시적 삭제 결정이 없으면 보존한다. Git working tree가 깨끗하고 `main`이 변경되지 않았는지 확인한다.

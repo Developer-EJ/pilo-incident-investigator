@@ -38,14 +38,21 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repositoryRootText)) {
 $repositoryRoot = [IO.Path]::GetFullPath($repositoryRootText).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 $repositoryPrefix = $repositoryRoot + [IO.Path]::DirectorySeparatorChar
 function Assert-OutsideRepositoryPath([string]$Path, [bool]$MustExist) {
-  if (-not [IO.Path]::IsPathFullyQualified($Path)) { throw 'Protected path must be absolute' }
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
+    throw 'Protected path must be absolute'
+  }
+  $pathRoot = [IO.Path]::GetPathRoot($Path)
+  if ([string]::IsNullOrWhiteSpace($pathRoot) -or $pathRoot -match '^[A-Za-z]:$' -or $pathRoot -in @('\', '/')) {
+    throw 'Protected path must be absolute'
+  }
+  $absolutePath = [IO.Path]::GetFullPath($Path)
   if ($MustExist) {
-    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    $resolvedPath = (Resolve-Path -LiteralPath $absolutePath -ErrorAction Stop).Path
   } else {
-    $parent = Split-Path -Parent $Path
+    $parent = Split-Path -Parent $absolutePath
     if ([string]::IsNullOrWhiteSpace($parent)) { throw 'Protected output parent is missing' }
     $resolvedParent = (Resolve-Path -LiteralPath $parent -ErrorAction Stop).Path
-    $resolvedPath = Join-Path $resolvedParent (Split-Path -Leaf $Path)
+    $resolvedPath = Join-Path $resolvedParent (Split-Path -Leaf $absolutePath)
   }
   $fullPath = [IO.Path]::GetFullPath($resolvedPath)
   if ($fullPath -ceq $repositoryRoot -or $fullPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -65,14 +72,30 @@ $eventPatternFile = Join-Path $routeTempDirectory 'application-route-event-patte
 $terraformPlanLog = Join-Path $routeTempDirectory 'application-route-terraform-plan.log'
 $terraformShowLog = Join-Path $routeTempDirectory 'application-route-terraform-show.log'
 $terraformApplyLog = Join-Path $routeTempDirectory 'application-route-terraform-apply.log'
+
+$terraformLambdaFunctionName = (& terraform -chdir=infra output -raw lambda_function_name 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($terraformLambdaFunctionName) -or $terraformLambdaFunctionName -cne $env:PILO_LAMBDA_FUNCTION_NAME) {
+  throw 'Lambda deployment binding is invalid'
+}
+$configuration = aws lambda get-function-configuration --function-name $terraformLambdaFunctionName --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
+if (
+  $LASTEXITCODE -ne 0 -or
+  $configuration.FunctionName -cne $env:PILO_LAMBDA_FUNCTION_NAME -or
+  $configuration.Environment.Variables.PILO_TOPOLOGY_BUCKET -cne $env:PILO_TOPOLOGY_BUCKET -or
+  $configuration.Environment.Variables.PILO_TOPOLOGY_KEY -cne $env:PILO_TOPOLOGY_KEY
+) {
+  throw 'Lambda deployment binding is invalid'
+}
 ~~~
 
 ## 1. topology를 먼저 갱신하고 checksum 확인
 
 보호된 additions JSON은 정확히 8개 mapping이어야 한다. baseline은 정확히 26개이고,
 candidate는 baseline과 additions의 합집합인 정확히 34개여야 한다. validator가 이를
-확인하므로 count나 mapping을 수동으로 수정하지 않는다. 아래 생성물은 모두 ignored
-temporary file이어야 하며, 실제 topology나 identifier를 저장소에 추가하지 않는다.
+확인하므로 count나 mapping을 수동으로 수정하지 않는다. 아래 생성물은 모두 저장소 밖 보호
+임시 artifact여야 하며, 실제 topology나 identifier를 저장소에 추가하지 않는다. 위 사전 점검에서
+Terraform Lambda 이름이나 배포 Lambda의 topology bucket/key가 보호 입력과 다르면 upload와 plan을
+실행하지 않는다.
 
 ~~~powershell
 aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
@@ -115,7 +138,7 @@ try {
 } finally {
   $sha256.Dispose()
 }
-$deployedLambdaChecksum = aws lambda get-function --function-name $env:PILO_LAMBDA_FUNCTION_NAME --query Configuration.CodeSha256 --output text --region ap-northeast-2 2>$null
+$deployedLambdaChecksum = aws lambda get-function --function-name $terraformLambdaFunctionName --query Configuration.CodeSha256 --output text --region ap-northeast-2 2>$null
 if ($LASTEXITCODE -ne 0 -or $deployedLambdaChecksum -cne $localLambdaChecksum) {
   throw 'Lambda artifact differs from the deployed function'
 }
@@ -137,29 +160,57 @@ if ($LASTEXITCODE -ne 0) { throw 'Terraform apply failed' }
 실제 Alarm 상태를 바꾸지 않는다.
 
 ~~~powershell
-$eventPattern = aws events describe-rule --name $env:PILO_EVENT_RULE_NAME --query EventPattern --output text --region ap-northeast-2 2>$null
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($eventPattern)) { throw 'EventBridge rule inspection failed' }
+$rule = aws events describe-rule --name $env:PILO_EVENT_RULE_NAME --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $rule.State -cne 'ENABLED' -or [string]::IsNullOrWhiteSpace($rule.EventPattern)) { throw 'EventBridge rule inspection failed' }
+$eventPattern = $rule.EventPattern
 [IO.File]::WriteAllText($eventPatternFile, $eventPattern, [Text.UTF8Encoding]::new($false))
 python scripts/verify_application_alarm_route.py validate-event-pattern --candidate $candidateTopologyFile --pattern $eventPatternFile *> $null
 if ($LASTEXITCODE -ne 0) { throw 'EventBridge event pattern validation failed' }
 
-$lambdaArn = terraform -chdir=infra output -raw lambda_function_arn 2>$null
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($lambdaArn)) { throw 'Terraform Lambda ARN output failed' }
+$terraformLambdaFunctionName = (& terraform -chdir=infra output -raw lambda_function_name 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $terraformLambdaFunctionName -cne $env:PILO_LAMBDA_FUNCTION_NAME) { throw 'Terraform Lambda name output is invalid' }
+$configuration = aws lambda get-function-configuration --function-name $terraformLambdaFunctionName --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
+if (
+  $LASTEXITCODE -ne 0 -or
+  $configuration.FunctionName -cne $terraformLambdaFunctionName -or
+  [string]::IsNullOrWhiteSpace($configuration.FunctionArn) -or
+  $configuration.Environment.Variables.PILO_MODE -cne 'snapshot_only' -or
+  $configuration.Environment.Variables.PILO_TOPOLOGY_BUCKET -cne $env:PILO_TOPOLOGY_BUCKET -or
+  $configuration.Environment.Variables.PILO_TOPOLOGY_KEY -cne $env:PILO_TOPOLOGY_KEY
+) {
+  throw 'Lambda runtime configuration is invalid'
+}
+$lambdaArn = $configuration.FunctionArn
 $listTargetsCommand = 'list' + '-' + 'targets-by-rule'
 $targets = & aws events $listTargetsCommand --rule $env:PILO_EVENT_RULE_NAME --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or @($targets.Targets).Count -ne 1 -or $targets.Targets[0].Arn -cne $lambdaArn) { throw 'EventBridge target binding is invalid' }
 foreach ($field in @('Input', 'InputPath', 'InputTransformer')) {
   if ($null -ne $targets.Targets[0].PSObject.Properties[$field]) { throw 'EventBridge target must preserve the original event' }
 }
-$configuration = aws lambda get-function-configuration --function-name $env:PILO_LAMBDA_FUNCTION_NAME --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $configuration.Environment.Variables.PILO_MODE -cne 'snapshot_only' -or [int]$configuration.ReservedConcurrentExecutions -ne 2) {
-  throw 'Lambda runtime configuration is invalid'
-}
+$concurrency = aws lambda get-function-concurrency --function-name $terraformLambdaFunctionName --region ap-northeast-2 --output json 2>$null | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $null -eq $concurrency.ReservedConcurrentExecutions -or [int]$concurrency.ReservedConcurrentExecutions -ne 2) { throw 'Lambda reserved concurrency is invalid' }
 terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$deployTfvarsFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Post-apply Terraform plan is not empty' }
 ~~~
 
-## 4. 실패와 rollback 경계
+## 4. 성공 후 보호 임시 artifact 정리
+
+모든 사후 검증이 성공한 뒤 candidate, plan JSON, saved tfplan, event pattern 및 Terraform log를
+삭제한다. baseline topology는 사용자 결정에 따라 보호 위치에 보존하거나 삭제하며, 명시적인 삭제
+결정이 없으면 보존한다.
+
+~~~powershell
+foreach ($path in @(
+  $candidateTopologyFile, $planJsonFile, $savedPlanFile, $eventPatternFile,
+  $terraformPlanLog, $terraformShowLog, $terraformApplyLog
+)) {
+  if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+# 사용자가 baseline 삭제를 명시적으로 결정한 경우에만 다음 명령을 별도로 실행한다.
+# Remove-Item -LiteralPath $baselineTopologyFile -Force
+~~~
+
+## 5. 실패와 rollback 경계
 
 검증 실패 시 자동 rollback하지 않는다. 현재 구성을 추측해 되돌리지 말고, 기존 26개 mapping을
 복원하는 별도 saved plan을 생성해 검토한 뒤 사용자 승인을 받아 수동으로 적용한다. 이 절차도

@@ -106,3 +106,41 @@ def test_runbook_rejects_protected_paths_inside_repository() -> None:
         "PILO_DEPLOY_TFVARS_FILE",
     ):
         assert f"$env:{name}" in text
+
+
+def test_runbook_uses_windows_powershell_51_compatible_absolute_path_check() -> None:
+    text = read_runbook()
+
+    assert "[IO.Path]::IsPathFullyQualified" not in text
+    assert "[IO.Path]::IsPathRooted" in text
+    assert "$absolutePath = [IO.Path]::GetFullPath($Path)" in text
+
+
+def test_runbook_post_apply_checks_exact_live_route_configuration() -> None:
+    text = read_runbook()
+
+    assert "terraform -chdir=infra output -raw lambda_function_name" in text
+    assert "lambda_function_arn" not in text
+    assert "aws events describe-rule" in text
+    assert ".State -cne 'ENABLED'" in text
+    assert ".FunctionArn" in text
+    assert "aws lambda get-function-concurrency" in text
+    assert ".ReservedConcurrentExecutions -ne 2" in text
+    assert "get-function-configuration" in text
+    assert "configuration.ReservedConcurrentExecutions" not in text
+
+
+def test_runbook_binds_protected_topology_to_deployed_lambda_before_mutation() -> None:
+    text = read_runbook()
+    binding_check = text.index("Lambda deployment binding is invalid")
+
+    assert "$terraformLambdaFunctionName -cne $env:PILO_LAMBDA_FUNCTION_NAME" in text
+    assert (
+        "$configuration.Environment.Variables.PILO_TOPOLOGY_BUCKET "
+        "-cne $env:PILO_TOPOLOGY_BUCKET" in text
+    )
+    assert (
+        "$configuration.Environment.Variables.PILO_TOPOLOGY_KEY -cne $env:PILO_TOPOLOGY_KEY" in text
+    )
+    assert binding_check < text.index("s3api put-object")
+    assert binding_check < text.index("terraform -chdir=infra plan")

@@ -18,6 +18,19 @@ ADDED_ALARM_COUNT = 8
 FINAL_ALARM_COUNT = 34
 ADDED_SERVICE_COUNT = 4
 ALARMS_PER_ADDED_SERVICE = 2
+ALLOWED_TERRAFORM_ACTION_SHAPES = frozenset(
+    {
+        ("no-op",),
+        ("create",),
+        ("read",),
+        ("update",),
+        ("delete",),
+        ("delete", "create"),
+        ("create", "delete"),
+        ("forget",),
+        ("create", "forget"),
+    }
+)
 
 
 class RouteContractError(ValueError):
@@ -116,13 +129,22 @@ def validate_terraform_plan(
     raw_changes = plan.get("resource_changes")
     if not isinstance(raw_changes, list):
         _fail("plan change count is invalid")
-    changes = [
-        item
-        for item in raw_changes
-        if isinstance(item, dict)
-        and isinstance(item.get("change"), dict)
-        and item["change"].get("actions") != ["no-op"]
-    ]
+    changes: list[dict[object, object]] = []
+    for item in raw_changes:
+        if not isinstance(item, dict):
+            _fail("plan change entry is invalid")
+        change = item.get("change")
+        if not isinstance(change, dict):
+            _fail("plan change entry is invalid")
+        actions = change.get("actions")
+        if (
+            not isinstance(actions, list)
+            or not all(isinstance(action, str) for action in actions)
+            or tuple(actions) not in ALLOWED_TERRAFORM_ACTION_SHAPES
+        ):
+            _fail("plan action shape is invalid")
+        if actions != ["no-op"]:
+            changes.append(item)
     if len(changes) != 1:
         _fail("plan change count is invalid")
     item = changes[0]
