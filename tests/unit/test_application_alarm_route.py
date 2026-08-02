@@ -267,6 +267,28 @@ def test_plan_rejects_malformed_no_op_even_with_valid_update() -> None:
         validate_terraform_plan(plan, baseline, candidate)
 
 
+def test_plan_rejects_no_op_with_unknown_values_even_when_snapshots_match() -> None:
+    baseline = frozenset(synthetic_alarm(number) for number in range(1, 27))
+    candidate = frozenset(synthetic_alarm(number) for number in range(1, 35))
+    plan = terraform_plan(event_pattern(baseline), event_pattern(candidate))
+    snapshot = {"value": "stable"}
+    plan["resource_changes"].insert(
+        0,
+        {
+            "address": "synthetic.unknown_no_op",
+            "change": {
+                "actions": ["no-op"],
+                "before": snapshot,
+                "after": dict(snapshot),
+                "after_unknown": {"value": True},
+            },
+        },
+    )
+
+    with pytest.raises(RouteContractError):
+        validate_terraform_plan(plan, baseline, candidate)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [

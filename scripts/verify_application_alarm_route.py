@@ -153,7 +153,7 @@ def validate_terraform_plan(
         ):
             _fail("plan change entry is invalid")
         if actions == ["no-op"]:
-            if before != after:
+            if before != after or after_unknown != {}:
                 _fail("plan no-op entry is invalid")
             continue
         changes.append(item)
