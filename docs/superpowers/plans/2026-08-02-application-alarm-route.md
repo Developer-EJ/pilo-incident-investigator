@@ -284,7 +284,7 @@ git commit -m "feat: validate application Alarm route changes (#28)"
 
 **Interfaces:**
 - Consumes protected environment variables: `PILO_DEV_ACCOUNT_ID`, `PILO_BASELINE_TOPOLOGY_FILE`, `PILO_CANDIDATE_TOPOLOGY_FILE`, `PILO_NEW_ALARM_MAPPINGS_FILE`, `PILO_TOPOLOGY_BUCKET`, `PILO_TOPOLOGY_KEY`, `PILO_EVENT_RULE_NAME`, `PILO_LAMBDA_FUNCTION_NAME`, `PILO_DEPLOY_TFVARS_FILE`.
-- Produces only ignored temporary files: candidate topology, `application-route.tfplan`, `application-route-plan.json`, `application-route-event-pattern.json`.
+- Produces only protected temporary files outside the repository: candidate topology, `application-route.tfplan`, `application-route-plan.json`, `application-route-event-pattern.json`, and Terraform output logs.
 - Never produces repository-tracked actual identifiers or topology data.
 
 - [ ] **Step 1: runbook 안전 계약의 실패 테스트 작성**
@@ -318,9 +318,9 @@ Run: `python -m pytest tests/unit/test_application_alarm_route_runbook.py -q`
 
 Expected: FAIL because the runbook does not exist.
 
-- [ ] **Step 3: 보호 입력과 계정 사전 점검 절차 작성**
+- [ ] **Step 3: 보호 입력, 저장소 밖 경로, 계정 사전 점검 절차 작성**
 
-runbook은 `Set-StrictMode -Version Latest`와 `$ErrorActionPreference = 'Stop'`으로 시작한다. 모든 보호 변수가 비어 있지 않은지 확인하고, `aws sts get-caller-identity`의 Account가 `PILO_DEV_ACCOUNT_ID`, region이 `ap-northeast-2`인지 비교한다. 실제 값을 출력하지 않는다.
+runbook은 `Set-StrictMode -Version Latest`와 `$ErrorActionPreference = 'Stop'`으로 시작한다. 모든 보호 변수가 비어 있지 않은지 확인하고, `Resolve-Path`와 `[IO.Path]::GetFullPath`로 baseline, candidate, additions, tfvars와 모든 temporary output parent가 저장소 밖인지 fail-closed로 확인한다. 기존 입력은 존재해야 하며 생성할 output은 저장소 밖의 기존 parent를 가져야 한다. 이후 `aws sts get-caller-identity`의 Account가 `PILO_DEV_ACCOUNT_ID`, region이 `ap-northeast-2`인지 비교한다. 실제 값을 출력하지 않는다.
 
 ```powershell
 $account = aws sts get-caller-identity --query Account --output text --region ap-northeast-2 2>$null
@@ -338,13 +338,13 @@ if ($LASTEXITCODE -ne 0 -or $region -cne "ap-northeast-2") {
 현재 object를 `PILO_BASELINE_TOPOLOGY_FILE`로 내려받고, 보호된 8개 mapping JSON으로 candidate를 만든 뒤 전환을 검증한다. 명령 출력은 버린다.
 
 ```powershell
-aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $env:PILO_BASELINE_TOPOLOGY_FILE 1>$null 2>$null
+aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology download failed" }
-python scripts/verify_application_alarm_route.py build-candidate --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --additions $env:PILO_NEW_ALARM_MAPPINGS_FILE --output $env:PILO_CANDIDATE_TOPOLOGY_FILE *> $null
+python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile *> $null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology candidate build failed" }
-python scripts/verify_application_alarm_route.py validate-transition --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --candidate $env:PILO_CANDIDATE_TOPOLOGY_FILE --additions $env:PILO_NEW_ALARM_MAPPINGS_FILE *> $null
+python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile *> $null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology transition failed" }
-aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $env:PILO_CANDIDATE_TOPOLOGY_FILE --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
+aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $candidateTopologyFile --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw "Protected topology upload failed" }
 ```
 
@@ -357,12 +357,14 @@ Lambda artifact를 재현 빌드하고 로컬 zip SHA-256과 현재 Lambda `Code
 ```powershell
 python scripts/build_lambda.py *> $null
 if ($LASTEXITCODE -ne 0) { throw "Lambda artifact build failed" }
-terraform -chdir=infra plan -input=false -var-file=$env:PILO_DEPLOY_TFVARS_FILE -out=application-route.tfplan
+terraform -chdir=infra plan -input=false -var-file=$deployTfvarsFile -out=$savedPlanFile *> $terraformPlanLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan failed" }
-terraform -chdir=infra show -json application-route.tfplan | Out-File -Encoding utf8 application-route-plan.json
-python scripts/verify_application_alarm_route.py validate-plan --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --candidate $env:PILO_CANDIDATE_TOPOLOGY_FILE --plan application-route-plan.json *> $null
+$planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
+if ($LASTEXITCODE -ne 0) { throw "Terraform plan JSON export failed" }
+[IO.File]::WriteAllText($planJsonFile, $planJson, [Text.UTF8Encoding]::new($false))
+python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile *> $null
 if ($LASTEXITCODE -ne 0) { throw "Terraform plan scope validation failed" }
-terraform -chdir=infra apply -input=false application-route.tfplan
+terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog
 if ($LASTEXITCODE -ne 0) { throw "Terraform apply failed" }
 ```
 
@@ -491,7 +493,7 @@ Expected: exactly one in-place EventBridge rule update; before resources are exa
 
 - [ ] **Step 4: 검증한 동일 saved plan 적용**
 
-Run: `terraform -chdir=infra apply -input=false application-route.tfplan`
+Run the runbook saved-plan apply command, which applies `$savedPlanFile` and captures all Terraform streams in the protected `$terraformApplyLog` outside the repository.
 
 Expected: `0 added, 1 changed, 0 destroyed`, with the one change limited to the EventBridge rule.
 
@@ -518,7 +520,7 @@ Expected: `PILO_MODE=snapshot_only`, reserved concurrency 2, topology AES256 and
 
 - [ ] **Step 3: Terraform 무변경 확인**
 
-Run: `terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$env:PILO_DEPLOY_TFVARS_FILE`
+Run the runbook post-apply `terraform plan -detailed-exitcode` command, which uses `$deployTfvarsFile` and suppresses Terraform detail output.
 
 Expected: exit code 0 and no changes. Exit code 2 means drift and must be reported; exit code 1 means plan error and must be diagnosed.
 

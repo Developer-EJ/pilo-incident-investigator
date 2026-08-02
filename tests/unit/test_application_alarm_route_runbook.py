@@ -65,7 +65,7 @@ def test_runbook_validates_checksum_and_reuses_saved_plan() -> None:
     assert "--checksum-mode ENABLED" in text
     assert "ChecksumSHA256" in text
     assert "application-route.tfplan" in text
-    assert "terraform -chdir=infra apply -input=false application-route.tfplan" in text
+    assert "terraform -chdir=infra apply -input=false $savedPlanFile" in text
 
 
 def test_runbook_requires_manual_rollback_boundary() -> None:
@@ -73,3 +73,36 @@ def test_runbook_requires_manual_rollback_boundary() -> None:
 
     assert "자동 rollback하지" in text
     assert "사용자 승인" in text
+
+
+def test_runbook_writes_plan_json_as_bomless_utf8() -> None:
+    text = read_runbook()
+
+    assert "Out-File -Encoding utf8" not in text
+    assert (
+        "[IO.File]::WriteAllText($planJsonFile, $planJson, [Text.UTF8Encoding]::new($false))"
+        in text
+    )
+
+
+def test_runbook_captures_terraform_output_outside_the_console() -> None:
+    text = read_runbook()
+
+    assert "terraform -chdir=infra plan" in text
+    assert "*> $terraformPlanLog" in text
+    assert "terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog" in text
+
+
+def test_runbook_rejects_protected_paths_inside_repository() -> None:
+    text = read_runbook()
+
+    assert "function Assert-OutsideRepositoryPath" in text
+    assert "Resolve-Path -LiteralPath" in text
+    assert "[IO.Path]::GetFullPath" in text
+    for name in (
+        "PILO_BASELINE_TOPOLOGY_FILE",
+        "PILO_CANDIDATE_TOPOLOGY_FILE",
+        "PILO_NEW_ALARM_MAPPINGS_FILE",
+        "PILO_DEPLOY_TFVARS_FILE",
+    ):
+        assert f"$env:{name}" in text

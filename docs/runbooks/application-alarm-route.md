@@ -30,6 +30,41 @@ $region = aws configure get region 2>$null
 if ($LASTEXITCODE -ne 0 -or $region -cne 'ap-northeast-2') {
   throw 'AWS region preflight failed'
 }
+
+$repositoryRootText = (& git rev-parse --show-toplevel 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($repositoryRootText)) {
+  throw 'Repository root lookup failed'
+}
+$repositoryRoot = [IO.Path]::GetFullPath($repositoryRootText).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$repositoryPrefix = $repositoryRoot + [IO.Path]::DirectorySeparatorChar
+function Assert-OutsideRepositoryPath([string]$Path, [bool]$MustExist) {
+  if (-not [IO.Path]::IsPathFullyQualified($Path)) { throw 'Protected path must be absolute' }
+  if ($MustExist) {
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+  } else {
+    $parent = Split-Path -Parent $Path
+    if ([string]::IsNullOrWhiteSpace($parent)) { throw 'Protected output parent is missing' }
+    $resolvedParent = (Resolve-Path -LiteralPath $parent -ErrorAction Stop).Path
+    $resolvedPath = Join-Path $resolvedParent (Split-Path -Leaf $Path)
+  }
+  $fullPath = [IO.Path]::GetFullPath($resolvedPath)
+  if ($fullPath -ceq $repositoryRoot -or $fullPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Protected path must be outside the repository'
+  }
+  return $fullPath
+}
+
+$baselineTopologyFile = Assert-OutsideRepositoryPath $env:PILO_BASELINE_TOPOLOGY_FILE $false
+$candidateTopologyFile = Assert-OutsideRepositoryPath $env:PILO_CANDIDATE_TOPOLOGY_FILE $false
+$newAlarmMappingsFile = Assert-OutsideRepositoryPath $env:PILO_NEW_ALARM_MAPPINGS_FILE $true
+$deployTfvarsFile = Assert-OutsideRepositoryPath $env:PILO_DEPLOY_TFVARS_FILE $true
+$routeTempDirectory = Split-Path -Parent $candidateTopologyFile
+$savedPlanFile = Join-Path $routeTempDirectory 'application-route.tfplan'
+$planJsonFile = Join-Path $routeTempDirectory 'application-route-plan.json'
+$eventPatternFile = Join-Path $routeTempDirectory 'application-route-event-pattern.json'
+$terraformPlanLog = Join-Path $routeTempDirectory 'application-route-terraform-plan.log'
+$terraformShowLog = Join-Path $routeTempDirectory 'application-route-terraform-show.log'
+$terraformApplyLog = Join-Path $routeTempDirectory 'application-route-terraform-apply.log'
 ~~~
 
 ## 1. topology를 먼저 갱신하고 checksum 확인
@@ -40,23 +75,19 @@ candidate는 baseline과 additions의 합집합인 정확히 34개여야 한다.
 temporary file이어야 하며, 실제 topology나 identifier를 저장소에 추가하지 않는다.
 
 ~~~powershell
-foreach ($path in @($env:PILO_CANDIDATE_TOPOLOGY_FILE, 'infra/application-route.tfplan', 'application-route-plan.json', 'application-route-event-pattern.json')) {
-  git check-ignore -q $path
-  if ($LASTEXITCODE -ne 0) { throw 'Temporary route artifact must be ignored' }
-}
-
-aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $env:PILO_BASELINE_TOPOLOGY_FILE 1>$null 2>$null
+aws s3api get-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --region ap-northeast-2 $baselineTopologyFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology download failed' }
-python scripts/verify_application_alarm_route.py build-candidate --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --additions $env:PILO_NEW_ALARM_MAPPINGS_FILE --output $env:PILO_CANDIDATE_TOPOLOGY_FILE *> $null
+if (-not (Test-Path -LiteralPath $baselineTopologyFile -PathType Leaf)) { throw 'Protected topology download output is missing' }
+python scripts/verify_application_alarm_route.py build-candidate --baseline $baselineTopologyFile --additions $newAlarmMappingsFile --output $candidateTopologyFile *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology candidate build failed' }
-python scripts/verify_application_alarm_route.py validate-transition --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --candidate $env:PILO_CANDIDATE_TOPOLOGY_FILE --additions $env:PILO_NEW_ALARM_MAPPINGS_FILE *> $null
+python scripts/verify_application_alarm_route.py validate-transition --baseline $baselineTopologyFile --candidate $candidateTopologyFile --additions $newAlarmMappingsFile *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology transition failed' }
-aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $env:PILO_CANDIDATE_TOPOLOGY_FILE --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
+aws s3api put-object --bucket $env:PILO_TOPOLOGY_BUCKET --key $env:PILO_TOPOLOGY_KEY --body $candidateTopologyFile --server-side-encryption AES256 --checksum-algorithm SHA256 --region ap-northeast-2 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Protected topology upload failed' }
 
 $sha256 = [Security.Cryptography.SHA256]::Create()
 try {
-  $localTopologyChecksum = [Convert]::ToBase64String($sha256.ComputeHash([IO.File]::ReadAllBytes($env:PILO_CANDIDATE_TOPOLOGY_FILE)))
+  $localTopologyChecksum = [Convert]::ToBase64String($sha256.ComputeHash([IO.File]::ReadAllBytes($candidateTopologyFile)))
 } finally {
   $sha256.Dispose()
 }
@@ -89,13 +120,14 @@ if ($LASTEXITCODE -ne 0 -or $deployedLambdaChecksum -cne $localLambdaChecksum) {
   throw 'Lambda artifact differs from the deployed function'
 }
 
-terraform -chdir=infra plan -input=false -var-file=$env:PILO_DEPLOY_TFVARS_FILE -out=application-route.tfplan
+terraform -chdir=infra plan -input=false -var-file=$deployTfvarsFile -out=$savedPlanFile *> $terraformPlanLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan failed' }
-terraform -chdir=infra show -json application-route.tfplan | Out-File -Encoding utf8 application-route-plan.json
+$planJson = terraform -chdir=infra show -json $savedPlanFile 2>$terraformShowLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan JSON export failed' }
-python scripts/verify_application_alarm_route.py validate-plan --baseline $env:PILO_BASELINE_TOPOLOGY_FILE --candidate $env:PILO_CANDIDATE_TOPOLOGY_FILE --plan application-route-plan.json *> $null
+[IO.File]::WriteAllText($planJsonFile, $planJson, [Text.UTF8Encoding]::new($false))
+python scripts/verify_application_alarm_route.py validate-plan --baseline $baselineTopologyFile --candidate $candidateTopologyFile --plan $planJsonFile *> $null
 if ($LASTEXITCODE -ne 0) { throw 'Terraform plan scope validation failed' }
-terraform -chdir=infra apply -input=false application-route.tfplan
+terraform -chdir=infra apply -input=false $savedPlanFile *> $terraformApplyLog
 if ($LASTEXITCODE -ne 0) { throw 'Terraform apply failed' }
 ~~~
 
@@ -107,8 +139,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Terraform apply failed' }
 ~~~powershell
 $eventPattern = aws events describe-rule --name $env:PILO_EVENT_RULE_NAME --query EventPattern --output text --region ap-northeast-2 2>$null
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($eventPattern)) { throw 'EventBridge rule inspection failed' }
-[IO.File]::WriteAllText('application-route-event-pattern.json', $eventPattern, [Text.UTF8Encoding]::new($false))
-python scripts/verify_application_alarm_route.py validate-event-pattern --candidate $env:PILO_CANDIDATE_TOPOLOGY_FILE --pattern application-route-event-pattern.json *> $null
+[IO.File]::WriteAllText($eventPatternFile, $eventPattern, [Text.UTF8Encoding]::new($false))
+python scripts/verify_application_alarm_route.py validate-event-pattern --candidate $candidateTopologyFile --pattern $eventPatternFile *> $null
 if ($LASTEXITCODE -ne 0) { throw 'EventBridge event pattern validation failed' }
 
 $lambdaArn = terraform -chdir=infra output -raw lambda_function_arn 2>$null
@@ -123,7 +155,7 @@ $configuration = aws lambda get-function-configuration --function-name $env:PILO
 if ($LASTEXITCODE -ne 0 -or $configuration.Environment.Variables.PILO_MODE -cne 'snapshot_only' -or [int]$configuration.ReservedConcurrentExecutions -ne 2) {
   throw 'Lambda runtime configuration is invalid'
 }
-terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$env:PILO_DEPLOY_TFVARS_FILE 1>$null 2>$null
+terraform -chdir=infra plan -input=false -detailed-exitcode -var-file=$deployTfvarsFile 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Post-apply Terraform plan is not empty' }
 ~~~
 
