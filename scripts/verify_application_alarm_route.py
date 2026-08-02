@@ -24,6 +24,11 @@ class RouteContractError(ValueError):
     """Raised without embedding protected identifiers."""
 
 
+class _ContractArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise RouteContractError("arguments are invalid")
+
+
 def _fail(message: str) -> NoReturn:
     raise RouteContractError(message)
 
@@ -189,8 +194,8 @@ def run_command(args: argparse.Namespace) -> int:
     _fail("command is invalid")
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+def _parser() -> _ContractArgumentParser:
+    parser = _ContractArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build-candidate")
     build.add_argument("--baseline", type=Path, required=True)
@@ -211,8 +216,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         return run_command(args)
     except (
         OSError,

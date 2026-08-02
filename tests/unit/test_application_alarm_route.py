@@ -291,3 +291,18 @@ def test_cli_never_echoes_sensitive_invalid_input(tmp_path: Path) -> None:
     assert completed.returncode == 2
     assert marker not in completed.stdout + completed.stderr
     assert completed.stderr == "application Alarm route validation failed\n"
+
+
+def test_cli_never_echoes_sensitive_argument_parse_error() -> None:
+    marker = "sensitive-argument-marker-never-print"
+
+    completed = subprocess.run(
+        [sys.executable, str(VERIFY), marker],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert marker not in completed.stdout + completed.stderr
+    assert completed.stderr == "application Alarm route validation failed\n"
