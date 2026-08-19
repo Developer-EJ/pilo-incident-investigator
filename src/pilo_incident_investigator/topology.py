@@ -5,8 +5,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
+
+from pilo_incident_investigator.redaction import Redactor
 
 
 class TopologyError(ValueError):
@@ -49,11 +52,24 @@ class ServiceTopology:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceOperations:
+    owner: str | None
+    runbook_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AlarmOperations:
+    priority: str
+
+
+@dataclass(frozen=True, slots=True)
 class Topology:
     environment: str
     region: str
     services: tuple[ServiceTopology, ...]
     alarm_mappings: tuple[tuple[str, tuple[str, ...]], ...]
+    _service_operations: tuple[tuple[str, ServiceOperations], ...] = field(repr=False)
+    _alarm_operations: tuple[tuple[str, AlarmOperations], ...] = field(repr=False)
     _allowed_resources: tuple[tuple[str, frozenset[str]], ...] = field(repr=False)
 
     @classmethod
@@ -64,7 +80,7 @@ class Topology:
             raise TopologyError("invalid YAML") from error
         if not isinstance(raw, dict):
             raise TopologyError("topology must be a mapping")
-        expected_fields = {"version", "environment", "region", "services", "alarms"}
+        expected_fields = {"version", "environment", "region", "services", "alarms", "operations"}
         unknown_fields = set(raw) - expected_fields
         if unknown_fields:
             raise TopologyError("topology contains unknown fields")
@@ -99,12 +115,21 @@ class Topology:
             if unknown:
                 raise TopologyError("alarm references unknown services")
 
+        operations_raw = raw.get("operations")
+        service_operations, alarm_operations = _parse_operations(
+            operations_raw,
+            service_keys,
+            [alarm_arn for alarm_arn, _ in alarm_mappings],
+            has_operations="operations" in raw,
+        )
         allowed_resources = _build_allowed_resources(services, alarm_mappings)
         return cls(
             environment="dev",
             region="ap-northeast-2",
             services=services,
             alarm_mappings=alarm_mappings,
+            _service_operations=service_operations,
+            _alarm_operations=alarm_operations,
             _allowed_resources=tuple(allowed_resources.items()),
         )
 
@@ -112,6 +137,12 @@ class Topology:
         mappings = dict(self.alarm_mappings)
         mapped_keys = set(mappings.get(alarm_arn, ()))
         return tuple(service for service in self.services if service.key in mapped_keys)
+
+    def operations_for_service(self, service_key: str) -> ServiceOperations:
+        return dict(self._service_operations).get(service_key, ServiceOperations(None, None))
+
+    def operations_for_alarm(self, alarm_arn: str) -> AlarmOperations:
+        return dict(self._alarm_operations).get(alarm_arn, AlarmOperations("P2"))
 
     def require_allowed(self, resource_type: str, resource_id: str) -> None:
         allowed = dict(self._allowed_resources).get(resource_type, frozenset())
@@ -146,6 +177,93 @@ def _parse_service(raw: Any) -> ServiceTopology:
         queues=_require_string_tuple(raw.get("queues"), "queues"),
         github_repository=_require_string(raw.get("github_repository"), "github_repository"),
     )
+
+
+def _parse_operations(
+    raw: Any,
+    service_keys: list[str],
+    alarm_arns: list[str],
+    *,
+    has_operations: bool,
+) -> tuple[tuple[tuple[str, ServiceOperations], ...], tuple[tuple[str, AlarmOperations], ...]]:
+    if not has_operations:
+        return (
+            tuple((service_key, ServiceOperations(None, None)) for service_key in service_keys),
+            tuple((alarm_arn, AlarmOperations("P2")) for alarm_arn in alarm_arns),
+        )
+    if not isinstance(raw, dict) or set(raw) != {"services", "alarms"}:
+        raise TopologyError("operations must contain services and alarms")
+    raw_services = raw["services"]
+    raw_alarms = raw["alarms"]
+    if not isinstance(raw_services, dict) or set(raw_services) != set(service_keys):
+        raise TopologyError("operations services must match topology services")
+    if not isinstance(raw_alarms, dict) or set(raw_alarms) != set(alarm_arns):
+        raise TopologyError("operations alarms must match topology alarms")
+
+    service_operations = tuple(
+        (service_key, _parse_service_operations(raw_services[service_key]))
+        for service_key in service_keys
+    )
+    alarm_operations = tuple(
+        (alarm_arn, _parse_alarm_operations(raw_alarms[alarm_arn])) for alarm_arn in alarm_arns
+    )
+    return service_operations, alarm_operations
+
+
+def _parse_service_operations(raw: Any) -> ServiceOperations:
+    if not isinstance(raw, dict) or set(raw) != {"owner", "runbook_url"}:
+        raise TopologyError("service operations must contain owner and runbook_url")
+    owner = _require_safe_owner(raw["owner"])
+    runbook_url = _require_runbook_url(raw["runbook_url"])
+    return ServiceOperations(owner=owner, runbook_url=runbook_url)
+
+
+def _parse_alarm_operations(raw: Any) -> AlarmOperations:
+    if not isinstance(raw, dict) or set(raw) != {"priority"}:
+        raise TopologyError("alarm operations must contain priority")
+    priority = _require_string(raw["priority"], "priority")
+    if priority not in {"P1", "P2", "P3"}:
+        raise TopologyError("priority must be P1, P2, or P3")
+    return AlarmOperations(priority=priority)
+
+
+def _require_safe_owner(value: Any) -> str:
+    owner = _require_string(value, "owner")
+    if len(owner) > 80 or owner != owner.strip() or not owner.isprintable():
+        raise TopologyError("owner must be a safe one-line string")
+    redacted, report = Redactor().redact_text(owner)
+    if report.replacements or redacted != owner:
+        raise TopologyError("owner must not contain credentials")
+    return owner
+
+
+def _require_runbook_url(value: Any) -> str:
+    runbook_url = _require_string(value, "runbook_url")
+    if len(runbook_url) > 512 or any(
+        not char.isprintable() or char.isspace() for char in runbook_url
+    ):
+        raise TopologyError("runbook_url must be a safe HTTPS URL")
+    try:
+        parsed = urlsplit(runbook_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise TopologyError("runbook_url must be a safe HTTPS URL") from error
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or not hostname
+        or (port is not None and not 1 <= port <= 65535)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise TopologyError("runbook_url must be a safe HTTPS URL")
+    redacted, report = Redactor().redact_text(runbook_url)
+    if report.replacements or redacted != runbook_url:
+        raise TopologyError("runbook_url must not contain credentials")
+    return runbook_url
 
 
 def _require_string(value: Any, field_name: str) -> str:
