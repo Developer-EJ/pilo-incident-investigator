@@ -69,10 +69,15 @@ class FakeSnapshotCollector:
             evidence=(
                 Evidence(
                     evidence_id="E-001",
-                    source="fake.snapshot",
+                    source="ecs.describe_services",
                     observed_at=NOW,
-                    summary="synthetic service is unhealthy",
-                    data={"running": 0},
+                    summary="target ECS state",
+                    data={
+                        "service": "pilo-dev-service-01",
+                        "desired": 1,
+                        "running": 0,
+                        "pending": 0,
+                    },
                 ),
             ),
             failures=self.failures,
@@ -299,7 +304,8 @@ def test_alarm_reaches_slack_with_issue_link() -> None:
     assert fixture.github.created_issue_count == 1
     assert len(fixture.slack.messages) == 1
     assert expected_id in fixture.slack.messages[0]
-    assert "classification=unclassified" in fixture.slack.messages[0]
+    assert "[PILO][P2][ALARM] pilo-dev-service-01" in fixture.slack.messages[0]
+    assert "확인: running 0/1" in fixture.slack.messages[0]
     assert (
         "https://github.com/synthetic-org/private-incidents/issues/1" in fixture.slack.messages[0]
     )
@@ -414,7 +420,24 @@ def test_degraded_github_delivery_is_retried_after_slack_handoff() -> None:
     assert fixture.github.created_issue_count == 1
     assert len(fixture.slack.messages) == 2
     assert "degraded" in fixture.slack.messages[0]
+    assert "[PILO]" not in fixture.slack.messages[0]
     assert fixture.state.processing_status == "complete"
+
+
+def test_unsafe_alert_brief_degrades_without_blocking_issue_publication() -> None:
+    fixture = runtime_fixture()
+    event = load_json("tests/fixtures/events/alarm.json")
+    detail = event["detail"]
+    assert isinstance(detail, dict)
+    detail["alarmName"] = "https://sqs.ap-northeast-2.amazonaws.com/000000000000/pilo-dev-queue-01"
+
+    response = fixture.runtime.handle(event)
+
+    assert response["status"] == "published"
+    assert fixture.github.created_issue_count == 1
+    assert len(fixture.slack.messages) == 1
+    assert "degraded: alert brief unavailable" in fixture.slack.messages[0]
+    assert "[PILO]" not in fixture.slack.messages[0]
 
 
 def test_failed_slack_delivery_retries_without_duplicate_issue() -> None:

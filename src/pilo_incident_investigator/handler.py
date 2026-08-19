@@ -30,6 +30,7 @@ from pilo_incident_investigator.agent.tools import (
     SqsStatusTool,
     ToolRegistry,
 )
+from pilo_incident_investigator.alert_brief import render_slack_alert_brief
 from pilo_incident_investigator.brief import render_issue_markdown
 from pilo_incident_investigator.bundle import canonical_bundle_json
 from pilo_incident_investigator.collectors.aws import AwsClient as CollectorAwsClient
@@ -54,7 +55,7 @@ from pilo_incident_investigator.publishers import (
 from pilo_incident_investigator.publishers import (
     S3Client as PublisherS3Client,
 )
-from pilo_incident_investigator.redaction import Redactor
+from pilo_incident_investigator.redaction import Redactor, UnsafeBundleError
 from pilo_incident_investigator.snapshot import SnapshotCollector
 from pilo_incident_investigator.state import (
     ClaimDisposition,
@@ -231,12 +232,16 @@ class Runtime:
                 metadata={"mode": self._mode},
             )
             safe_bundle, _ = Redactor().redact_bundle(bundle)
+            try:
+                slack_summary = render_slack_alert_brief(safe_bundle, topology)
+            except UnsafeBundleError:
+                slack_summary = "degraded: alert brief unavailable"
             publication = PublicationPayload(
                 event_id=alarm.event_id,
                 incident_id=incident_id,
                 bundle_bytes=canonical_bundle_json(safe_bundle),
                 issue_markdown=render_issue_markdown(safe_bundle),
-                slack_summary=f"classification={safe_bundle.investigation.classification}"[:500],
+                slack_summary=slack_summary,
             )
 
             stage = "publish"
