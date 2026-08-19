@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
@@ -46,6 +46,7 @@ from pilo_incident_investigator.domain import (
 from pilo_incident_investigator.event import incident_id_for, parse_alarm_event
 from pilo_incident_investigator.integrations.credentials import SsmClient, SsmCredentialProvider
 from pilo_incident_investigator.integrations.github import GitHubClient
+from pilo_incident_investigator.observability import MetricName, MetricUnit, emit_metric
 from pilo_incident_investigator.publishers import (
     PublicationPayload,
     Publisher,
@@ -194,6 +195,12 @@ class Runtime:
         try:
             alarm = parse_alarm_event(event)
             incident_id = incident_id_for(alarm.event_id)
+            _emit_metric(
+                metric_name="EventsReceived",
+                value=1,
+                unit="Count",
+                dimensions={"Mode": self._mode},
+            )
             stage = "load_topology"
             topology = self._topology.load()
             stage = "claim_event"
@@ -210,6 +217,21 @@ class Runtime:
 
             stage = "snapshot"
             snapshot = self._snapshots.collect(alarm, topology)
+            for failure in snapshot.failures:
+                if failure.collector in {
+                    "alarm_target_ecs",
+                    "stopped_tasks_and_logs",
+                    "alb_target_health",
+                    "all_pilo_services",
+                    "recent_github_deployments",
+                    "rds_basic_status",
+                }:
+                    _emit_metric(
+                        metric_name="CollectorFailures",
+                        value=1,
+                        unit="Count",
+                        dimensions={"Collector": failure.collector},
+                    )
             if not self._state.mark_snapshot_complete(alarm.event_id):
                 raise RuntimeStateError("snapshot checkpoint was not recorded")
 
@@ -236,6 +258,12 @@ class Runtime:
                 slack_summary = render_slack_alert_brief(safe_bundle, topology)
             except UnsafeBundleError:
                 slack_summary = "degraded: alert brief unavailable"
+                _emit_metric(
+                    metric_name="IncidentsFailed",
+                    value=1,
+                    unit="Count",
+                    dimensions={"Stage": "render"},
+                )
             publication = PublicationPayload(
                 event_id=alarm.event_id,
                 incident_id=incident_id,
@@ -247,13 +275,50 @@ class Runtime:
             stage = "publish"
             result = self._publisher.publish(publication)
             if result.issue_url is None or result.slack_status != "sent":
+                _emit_metric(
+                    metric_name="IncidentsDegraded",
+                    value=1,
+                    unit="Count",
+                    dimensions={"Stage": "publish"},
+                )
+                _emit_metric(
+                    metric_name="ProcessingDuration",
+                    value=_duration_ms(started, self._monotonic()),
+                    unit="Milliseconds",
+                    dimensions={"Outcome": "degraded"},
+                )
                 raise RetryablePublicationError("incident publication is degraded")
             if not self._state.mark_complete(alarm.event_id, attempt_id):
                 raise RuntimeStateError("completed event state was not recorded")
             active_attempt = None
+            _emit_metric(
+                metric_name="IncidentsPublished",
+                value=1,
+                unit="Count",
+                dimensions={"Mode": self._mode},
+            )
+            _emit_metric(
+                metric_name="ProcessingDuration",
+                value=_duration_ms(started, self._monotonic()),
+                unit="Milliseconds",
+                dimensions={"Outcome": "published"},
+            )
             self._log(incident_id, "published", started)
             return {"incident_id": incident_id, "status": "published"}
         except Exception as error:
+            if not isinstance(error, RetryablePublicationError):
+                _emit_metric(
+                    metric_name="IncidentsFailed",
+                    value=1,
+                    unit="Count",
+                    dimensions={"Stage": stage},
+                )
+                _emit_metric(
+                    metric_name="ProcessingDuration",
+                    value=_duration_ms(started, self._monotonic()),
+                    unit="Milliseconds",
+                    dimensions={"Outcome": "failed"},
+                )
             if active_attempt is not None:
                 try:
                     self._state.mark_retryable(alarm.event_id, active_attempt)
@@ -363,6 +428,25 @@ def lambda_handler(event: dict[str, JsonValue], context: object) -> dict[str, st
 
 def _duration_ms(started: float, finished: float) -> int:
     return max(0, round((finished - started) * 1_000))
+
+
+def _emit_metric(
+    *,
+    metric_name: MetricName,
+    value: int,
+    unit: MetricUnit,
+    dimensions: Mapping[str, str],
+) -> None:
+    """Keep operational telemetry from altering incident handling."""
+    try:
+        emit_metric(
+            metric_name=metric_name,
+            value=value,
+            unit=unit,
+            dimensions=dimensions,
+        )
+    except Exception:
+        return
 
 
 def _preserve_collector_failures(investigation: Investigation, snapshot: Snapshot) -> Investigation:
