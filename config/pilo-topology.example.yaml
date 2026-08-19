@@ -83,3 +83,22 @@ alarms:
   arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-06: [pilo-dev-service-06]
   arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-07: [pilo-dev-service-07]
   arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-08: [pilo-dev-service-08]
+operations:
+  services:
+    pilo-dev-service-01: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-01}
+    pilo-dev-service-02: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-02}
+    pilo-dev-service-03: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-03}
+    pilo-dev-service-04: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-04}
+    pilo-dev-service-05: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-05}
+    pilo-dev-service-06: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-06}
+    pilo-dev-service-07: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-07}
+    pilo-dev-service-08: {owner: API operations, runbook_url: https://runbooks.example.invalid/pilo-dev-service-08}
+  alarms:
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-01: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-02: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-03: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-04: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-05: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-06: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-07: {priority: P2}
+    arn:aws:cloudwatch:ap-northeast-2:000000000000:alarm:pilo-dev-service-08: {priority: P2}
