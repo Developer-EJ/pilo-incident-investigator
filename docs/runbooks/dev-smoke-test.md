@@ -424,6 +424,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Synthetic alarm state change failed" }
 
   $incidentId = Wait-ForPublishedIncident $smokeStartedAt
+  # 사람이 test channel과 private Issue에서 서비스, Alarm, 확인된 사실, 정보 공백, private Issue 링크를 수동으로 대조한다.
+  # 이 값들을 입력·출력·저장하지 않는다. 아래 확인값은 대조 완료 여부만 나타낸다.
   $slackConfirmation = Read-Host "After manually checking the test channel summary and private Issue link, enter CONFIRMED"
   if ($slackConfirmation -cne "CONFIRMED") { throw "Slack test-channel confirmation was not provided" }
 
