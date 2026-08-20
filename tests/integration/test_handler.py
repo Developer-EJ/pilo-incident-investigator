@@ -44,6 +44,15 @@ def load_json(path: str) -> dict[str, JsonValue]:
     return cast(dict[str, JsonValue], raw)
 
 
+def metric_payloads(stdout: str) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for line in stdout.splitlines():
+        payload = json.loads(line)
+        assert isinstance(payload, dict)
+        payloads.append(payload)
+    return payloads
+
+
 class FakeTopologyProvider:
     def __init__(self) -> None:
         self.calls = 0
@@ -312,6 +321,49 @@ def test_alarm_reaches_slack_with_issue_link() -> None:
     assert fixture.state.snapshot_events == ["evt-001"]
 
 
+def test_handler_emits_safe_normal_and_collector_metrics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "SENSITIVE-COLLECTOR-DETAIL"
+    fixture = runtime_fixture(
+        collector_failures=(CollectorFailure("alarm_target_ecs", "timeout", marker),)
+    )
+    fixture.runtime.handle(load_json("tests/fixtures/events/alarm.json"))
+
+    captured = capsys.readouterr()
+    payloads = metric_payloads(captured.out)
+    assert any(
+        payload.get("EventsReceived") == 1 and payload.get("Mode") == "snapshot_only"
+        for payload in payloads
+    )
+    assert any(
+        payload.get("CollectorFailures") == 1 and payload.get("Collector") == "alarm_target_ecs"
+        for payload in payloads
+    )
+    assert any(payload.get("IncidentsPublished") == 1 for payload in payloads)
+    assert any(
+        payload.get("ProcessingDuration") is not None and payload.get("Outcome") == "published"
+        for payload in payloads
+    )
+    assert marker not in captured.out
+
+
+def test_metric_emission_failure_does_not_block_incident_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = runtime_fixture()
+
+    def fail_metric_emission(*args: object, **kwargs: object) -> None:
+        raise OSError("metric sink unavailable")
+
+    monkeypatch.setattr(handler_module, "emit_metric", fail_metric_emission)
+
+    response = fixture.runtime.handle(load_json("tests/fixtures/events/alarm.json"))
+
+    assert response["status"] == "published"
+    assert fixture.github.created_issue_count == 1
+
+
 def test_snapshot_only_mode_never_exposes_tool_schema() -> None:
     fixture = runtime_fixture()
 
@@ -408,7 +460,9 @@ def test_unknown_alarm_skips_models_and_is_published_unclassified() -> None:
     assert investigation["classification_evidence_ids"] == []
 
 
-def test_degraded_github_delivery_is_retried_after_slack_handoff() -> None:
+def test_degraded_github_delivery_is_retried_after_slack_handoff(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     fixture = runtime_fixture(github_failures=1)
     event = load_json("tests/fixtures/events/alarm.json")
 
@@ -422,9 +476,20 @@ def test_degraded_github_delivery_is_retried_after_slack_handoff() -> None:
     assert "degraded" in fixture.slack.messages[0]
     assert "[PILO]" not in fixture.slack.messages[0]
     assert fixture.state.processing_status == "complete"
+    payloads = metric_payloads(capsys.readouterr().out)
+    assert any(
+        payload.get("IncidentsDegraded") == 1 and payload.get("Stage") == "publish"
+        for payload in payloads
+    )
+    assert any(
+        payload.get("ProcessingDuration") is not None and payload.get("Outcome") == "degraded"
+        for payload in payloads
+    )
 
 
-def test_unsafe_alert_brief_degrades_without_blocking_issue_publication() -> None:
+def test_unsafe_alert_brief_degrades_without_blocking_issue_publication(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     fixture = runtime_fixture()
     event = load_json("tests/fixtures/events/alarm.json")
     detail = event["detail"]
@@ -438,6 +503,11 @@ def test_unsafe_alert_brief_degrades_without_blocking_issue_publication() -> Non
     assert len(fixture.slack.messages) == 1
     assert "degraded: alert brief unavailable" in fixture.slack.messages[0]
     assert "[PILO]" not in fixture.slack.messages[0]
+    payloads = metric_payloads(capsys.readouterr().out)
+    assert any(
+        payload.get("IncidentsFailed") == 1 and payload.get("Stage") == "render"
+        for payload in payloads
+    )
 
 
 def test_failed_slack_delivery_retries_without_duplicate_issue() -> None:
